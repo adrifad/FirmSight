@@ -1,0 +1,51 @@
+.settings-form { display: grid; gap: 12px; max-width: 880px; }
+.settings-form input { min-height: 42px; }
+.model-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.provider-presets {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid rgba(168, 242, 90, 0.22);
+  border-radius: 16px;
+  background: rgba(168, 242, 90, 0.04);
+}
+.provider-preset-copy { min-width: 0; }
+.provider-preset-copy .eyebrow { margin-bottom: 5px; color: var(--brand-primary); }
+.provider-preset-copy h3 { margin: 0; font-size: 15px; }
+.provider-preset-copy p:last-child { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.provider-presets > button { white-space: nowrap; }
+.provider-presets > code { grid-column: 1 / -1; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }
+.provider-presets > span { grid-column: 1 / -1; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.key-status {
+  display: flex;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--success-border);
+  border-radius: 12px;
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+.key-status > svg { flex: 0 0 auto; margin-top: 1px; }
+.key-status > div { display: grid; gap: 3px; }
+.key-status strong { font-size: 13px; }
+.key-status span { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.key-status code, .settings-grid code {
+  overflow-wrap: anywhere;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--brand-primary-deep);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.settings-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-grid > div { padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
+.settings-grid dd { color: var(--text-secondary); font-family: var(--font-mono); font-size: 12px; font-weight: 500; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .model-grid, .settings-grid { grid-template-columns: 1fr; }
+  .provider-presets { grid-template-columns: 1fr; }
+  .provider-presets > button { justify-self: start; }
+}

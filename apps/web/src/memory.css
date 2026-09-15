@@ -1,0 +1,9 @@
+.memory-workspace { display: grid; gap: 16px; grid-template-columns: 330px minmax(0, 1fr); }
+.memory-form { display: grid; align-content: start; gap: 2px; }
+.memory-form > p { margin: 7px 0 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
+.memory-form textarea { min-height: 82px; }
+.memory-list { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+.memory-card { min-height: 185px; padding: 18px; border-radius: var(--radius-card); }
+.memory-card h3 { margin: 11px 0 7px; font-size: 13px; }
+.memory-card p { margin: 0 0 12px; color: var(--text-secondary); font-size: 12.5px; line-height: 1.52; overflow-wrap: anywhere; }
+.memory-card small { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10.5px; overflow-wrap: anywhere; }

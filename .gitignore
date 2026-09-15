@@ -1,0 +1,17 @@
+.env
+.env.local
+.venv/
+data/
+.pytest_cache/
+__pycache__/
+*.pyc
+apps/web/node_modules/
+apps/web/dist/
+*.env
+.agents
+.ai
+.codex
+.pytest_cache
+.vite
+apps/web/.pytest_cache
+docs
