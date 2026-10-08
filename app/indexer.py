@@ -53,6 +53,12 @@ RESOURCE_OPERATION_TYPES = {
     "portENTER_CRITICAL": "LOCK", "taskENTER_CRITICAL": "LOCK",
     "portEXIT_CRITICAL": "UNLOCK", "taskEXIT_CRITICAL": "UNLOCK",
 }
+UNTRUSTED_INPUT_APIS = {
+    "recv": "SOCKET", "recvfrom": "SOCKET", "uart_read_bytes": "UART",
+    "httpd_req_get_url_query_str": "HTTP", "httpd_query_key_value": "HTTP",
+    "esp_http_client_read": "HTTP",
+}
+DATA_SINK_APIS = {"memcpy", "memmove", "strcpy", "strncpy", "sprintf", "snprintf", "atoi", "strtol", "nvs_set_blob", "nvs_set_str"}
 
 
 def _call_arguments(text: str, opening: int) -> list[str] | None:
@@ -86,6 +92,32 @@ def _simple_argument_name(value: str) -> str | None:
         value = value[1:-1]
     match = re.fullmatch(r"&?([A-Za-z_]\w*)", value)
     return match.group(1) if match else None
+
+
+def _parameter_names(signature: str) -> list[str | None]:
+    """Extract only plain C/C++ parameter identifiers from a function signature."""
+    opening = signature.find("(")
+    closing = signature.rfind(")")
+    if opening < 0 or closing <= opening:
+        return []
+    arguments = _call_arguments(signature, opening)
+    if arguments is None:
+        return []
+    result: list[str] = []
+    for argument in arguments:
+        if not argument or argument == "void" or "..." in argument:
+            continue
+        # Parameter declarations are intentionally handled conservatively: the
+        # final simple identifier is the name only for non-template declarators.
+        identifiers = re.findall(r"\b[A-Za-z_]\w*\b", argument)
+        if len(identifiers) < 2:
+            # An unnamed typedef parameter is ambiguous with a lone parameter
+            # name, so it is deliberately not used for argument mapping.
+            result.append(None)
+            continue
+        match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*$", argument)
+        result.append(match.group(1) if match else None)
+    return result
 
 
 def safe_project_path(path: str) -> str:
@@ -315,6 +347,8 @@ class FirmwareIndexer:
                 self._add_registered_callbacks(project_id, path, content, masked, body, function, by_name, relations)
                 self._add_resources(project_id, path, content, body, function, relations)
                 self._add_allocations(project_id, path, content, body, function, allocations, relations)
+                self._add_data_facts(project_id, path, content, body, function, relations)
+            self._add_global_accesses(project_id, path, content, masked, function_symbols, relations)
         if framework == "ESP-IDF":
             for function in function_symbols:
                 if function["name"] == "app_main":
@@ -351,6 +385,31 @@ class FirmwareIndexer:
             candidates = by_name.get(name, [])
             target = candidates[0] if len(candidates) == 1 else None
             self._relation(relations, project_id, "CALLS", source["id"], target["id"] if target else None, None if target else name, path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED" if target else "INFERRED", 1.0 if target else 0.35)
+            if target is None:
+                continue
+            opening = body.find("(", match.start())
+            arguments = _call_arguments(body, opening)
+            parameters = _parameter_names(str(target.get("signature") or ""))
+            if arguments is None:
+                continue
+            for index, (parameter, argument) in enumerate(zip(parameters, arguments)):
+                if not parameter:
+                    continue
+                identifier = _simple_argument_name(argument)
+                if not identifier:
+                    continue
+                self._relation(
+                    relations, project_id, "PROPAGATES_ARGUMENT", source["id"], target["id"], parameter,
+                    path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 0.9,
+                    {"call": name, "argument_index": str(index), "source_identifier": identifier, "target_parameter": parameter},
+                )
+            result_match = re.search(r"([A-Za-z_]\w*)\s*=\s*$", body[max(0, match.start() - 100):match.start()])
+            if result_match:
+                self._relation(
+                    relations, project_id, "CAPTURES_RETURN", source["id"], target["id"], result_match.group(1),
+                    path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 0.8,
+                    {"call": name, "result_identifier": result_match.group(1)},
+                )
 
     def _add_tasks_and_isrs(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], by_name: dict[str, list[dict[str, Any]]], relations: list[dict[str, Any]]) -> None:
         for api in (*TASK_CREATORS, *ISR_CREATORS):
@@ -425,8 +484,26 @@ class FirmwareIndexer:
             _line_at(content, source["_body_start"] + offset),
             "OBSERVED" if target else "INFERRED", 1.0 if target else 0.35, metadata,
         )
+        if api == "esp_mqtt_client_register_event" and target is not None:
+            self._relation(
+                relations, project_id, "UNTRUSTED_INPUT", target["id"], None, "mqtt_event.payload",
+                path, _line_at(content, source["_body_start"] + offset), "OBSERVED", 0.8,
+                {"api": api, "source_kind": "MQTT_EVENT", "registration": "STATIC_ARGUMENT"},
+            )
 
     def _add_resources(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], relations: list[dict[str, Any]]) -> None:
+        for api, resource_kind in RESOURCE_CREATORS.items():
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                before = body[max(0, match.start() - 160):match.start()]
+                owner_match = re.search(r"(?:\b[A-Za-z_]\w*\s+)?([A-Za-z_]\w*)\s*=\s*$", before)
+                resource = owner_match.group(1) if owner_match else None
+                if resource:
+                    self._relation(
+                        relations, project_id, "CREATES_RESOURCE", source["id"], None,
+                        api, path, _line_at(content, source["_body_start"] + match.start()),
+                        "OBSERVED", 1.0,
+                        {"api": api, "operation": "CREATE", "resource": resource, "resource_kind": resource_kind},
+                    )
         for api, relation_kind in RESOURCE_OPERATIONS.items():
             for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
                 arguments = _call_arguments(body, body.find("(", match.start()))
@@ -437,7 +514,91 @@ class FirmwareIndexer:
                 metadata = {"api": api, "operation": RESOURCE_OPERATION_TYPES.get(api, "RESOURCE")}
                 if resource:
                     metadata["resource"] = resource
+                if api in {"xQueueSend", "xQueueSendToBack", "xQueueSendFromISR", "xQueueReceive", "xQueueReceiveFromISR"} and len(arguments) > 1:
+                    payload = _simple_argument_name(arguments[1])
+                    if payload:
+                        metadata["payload"] = payload
+                        metadata["copy_semantics"] = "FREERTOS_VALUE_COPY"
                 self._relation(relations, project_id, relation_kind, source["id"], None, api, path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0, metadata)
+
+    def _add_data_facts(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], relations: list[dict[str, Any]]) -> None:
+        """Index a small, explicit source/validation/sink vocabulary.
+
+        These are source observations, not taint proofs: the flow service keeps
+        them as evidence labels and never assumes an untracked value alias.
+        """
+        for parameter in _parameter_names(str(source.get("signature") or "")):
+            if parameter:
+                self._relation(relations, project_id, "PARAMETER", source["id"], None, parameter, path,
+                               int(source.get("line_start") or 1), "OBSERVED", 0.85,
+                               {"identifier": parameter})
+        for api, source_kind in UNTRUSTED_INPUT_APIS.items():
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                arguments = _call_arguments(body, body.find("(", match.start()))
+                output_index = {"httpd_req_get_url_query_str": 1, "httpd_query_key_value": 2}.get(api, 1)
+                output = _simple_argument_name(arguments[output_index]) if arguments and len(arguments) > output_index else None
+                self._relation(relations, project_id, "UNTRUSTED_INPUT", source["id"], None, api, path,
+                               _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0,
+                               {"api": api, "source_kind": source_kind, **({"output_identifier": output} if output else {})})
+        for api in DATA_SINK_APIS:
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                arguments = _call_arguments(body, body.find("(", match.start()))
+                argument_names = [_simple_argument_name(argument) for argument in (arguments or [])[:6]]
+                self._relation(relations, project_id, "DATA_SINK", source["id"], None, api, path,
+                               _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0,
+                               {"api": api, "sink_kind": "MEMORY_OR_EXTERNAL_WRITE", "arguments": ",".join(name or "?" for name in argument_names)})
+        for match in re.finditer(r"\bif\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)", body):
+            predicate = re.sub(r"\s+", " ", match.group(1)).strip()[:180]
+            if not re.search(r"(?:<=|>=|<|>|==|!=|\.\.\.)", predicate):
+                continue
+            identifiers = sorted(set(re.findall(r"\b[A-Za-z_]\w*\b", predicate)) - CONTROL_NAMES)
+            self._relation(relations, project_id, "VALIDATES", source["id"], None, None, path,
+                           _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 0.85,
+                           {"predicate": predicate, "identifiers": ",".join(identifiers[:8])})
+        for match in re.finditer(r"\b([A-Za-z_]\w*)\s*=\s*&?([A-Za-z_]\w*)\s*;", body):
+            self._relation(relations, project_id, "ASSIGNS", source["id"], None, match.group(1), path,
+                           _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 0.85,
+                           {"target_identifier": match.group(1), "source_identifier": match.group(2)})
+        for match in re.finditer(r"\breturn\s+([A-Za-z_]\w*)\s*;", body):
+            self._relation(relations, project_id, "RETURNS_VALUE", source["id"], None, match.group(1), path,
+                           _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 0.8,
+                           {"source_identifier": match.group(1)})
+
+    def _add_global_accesses(self, project_id: str, path: str, content: str, masked: str,
+                             functions: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
+        """Index simple file-scope scalar declarations and direct identifier access."""
+        function_spans = [(int(item["_body_start"]), int(item["_body_end"])) for item in functions if item["file"] == path]
+        globals_found: set[str] = set()
+        for line_match in re.finditer(r"(?m)^\s*(?:static\s+)?(?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+)*[A-Za-z_]\w*(?:\s*\*)?\s+([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*(?:=[^;]*)?;", masked):
+            offset = line_match.start()
+            if any(start <= offset <= end for start, end in function_spans):
+                continue
+            if "(" in line_match.group(0) or "typedef" in line_match.group(0):
+                continue
+            globals_found.add(line_match.group(1))
+        if not globals_found:
+            return
+        for function in functions:
+            if function["file"] != path:
+                continue
+            body = masked[int(function["_body_start"]):int(function["_body_end"])]
+            for variable in sorted(globals_found):
+                for match in re.finditer(rf"\b{re.escape(variable)}\b", body):
+                    tail = body[match.end():match.end() + 8]
+                    head = body[max(0, match.start() - 4):match.start()]
+                    write = bool(re.match(r"\s*(?:\+\+|--|(?:[+*/%&|^-]?=))", tail)) or bool(re.search(r"(?:\+\+|--)\s*$", head))
+                    kind = "WRITES" if write else "READS"
+                    line = _line_at(content, int(function["_body_start"]) + match.start())
+                    metadata = {"variable": variable, "access": kind}
+                    if write:
+                        assignment = re.match(r"\s*(?:=)\s*([A-Za-z_]\w*)", tail)
+                        if assignment:
+                            metadata["new_state"] = assignment.group(1)
+                            metadata["state_value_kind"] = "IDENTIFIER"
+                    self._relation(relations, project_id, kind, function["id"], None, variable, path, line, "OBSERVED", 0.9, metadata)
+                    if write and metadata.get("new_state"):
+                        self._relation(relations, project_id, "CHANGES_STATE", function["id"], None, variable, path, line,
+                                       "OBSERVED", 0.85, {"variable": variable, "new_state": metadata["new_state"]})
 
     def _add_allocations(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], allocations: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
         for match in re.finditer(r"\b([A-Za-z_]\w*(?:\[\])?)\s*\(", body):

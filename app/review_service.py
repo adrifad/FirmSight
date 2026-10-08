@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from threading import BoundedSemaphore, Event as _ThreadEvent, Lock as _ThreadLock, Thread as _Thread
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
 
 from fastapi import HTTPException, status
@@ -178,12 +178,13 @@ class ReviewService:
         "may", "might", "no", "not", "of", "on", "or", "that", "the", "their", "this", "to", "when", "with", "without",
     }
 
-    def __init__(self, repository: PlatformRepository, projects: ProjectService, provider_resolver: Callable[[str], AIProvider], memories: MemoryService, intelligence: "IntelligenceService | None" = None, review_context_resolver: Callable[[], int] | None = None, review_parallel_resolver: Callable[[], int] | None = None, context_builder: "ContextBuilder | None" = None, knowledge_base: "KnowledgeBaseService | None" = None, knowledge_index: "KnowledgeIndexService | None" = None, post_review_projection: "Callable[[str], dict[str, object]] | None" = None, language_resolver: Callable[[], str] | None = None) -> None:
+    def __init__(self, repository: PlatformRepository, projects: ProjectService, provider_resolver: Callable[[str], AIProvider], memories: MemoryService, intelligence: "IntelligenceService | None" = None, review_context_resolver: Callable[[], int] | None = None, review_parallel_resolver: Callable[[], int] | None = None, context_builder: "ContextBuilder | None" = None, knowledge_base: "KnowledgeBaseService | None" = None, knowledge_index: "KnowledgeIndexService | None" = None, post_review_projection: "Callable[[str], dict[str, object]] | None" = None, language_resolver: Callable[[], str] | None = None, flow_service: Any | None = None) -> None:
         self.repository, self.projects, self.provider_resolver, self.memories = repository, projects, provider_resolver, memories
         self.intelligence = intelligence
         self.review_context_resolver = review_context_resolver or (lambda: DEFAULT_REVIEW_CONTEXT_CHARS)
         self.review_parallel_resolver = review_parallel_resolver or (lambda: 1)
         self.context_builder = context_builder
+        self.flow_service = flow_service
         self.knowledge_base = knowledge_base
         self.knowledge_index = knowledge_index
         self.post_review_projection = post_review_projection
@@ -1023,6 +1024,12 @@ class ReviewService:
                         finding_source_relations,
                         source_snapshot_hash=current_snapshot_hash,
                         topology_fingerprint=finding_topology_snapshot.get("relation_fingerprint"),
+                        flow_scenarios=(
+                            self.flow_service.build(
+                                review.project_id, symbols=finding_source_symbols,
+                                relations=finding_source_relations, snapshot=finding_topology_snapshot,
+                            ) if getattr(self, "flow_service", None) else None
+                        ),
                     )
                 })
                 payload = finding.model_dump(mode="json", exclude={"id", "project_id", "review_id", "decision", "decision_reason", "resolution", "resolved_at", "remediation", "created_at"})
@@ -2006,7 +2013,7 @@ class ReviewService:
                 ]
             except Exception:  # noqa: BLE001 - missing derived lifetime data makes the check conservative
                 lifetime = []
-        return build_differential_context(
+        context = build_differential_context(
             finding, before_files, current_files,
             before_symbols=baseline_symbols, current_symbols=current_symbols,
             before_relations=baseline_relations, current_relations=current_relations,
@@ -2015,6 +2022,15 @@ class ReviewService:
             finding_baseline=finding_baseline or finding.verification_baseline,
             max_chars=self.MAX_REREVIEW_CONTEXT_CHARS,
         )
+        flow_service = getattr(self, "flow_service", None)
+        if project_id and flow_service:
+            try:
+                flow = flow_service.context_for_symbols(project_id, [finding.location.function] if finding.location.function else [], cap=16)
+                flow_block = "\n\nCURRENT FLOW INTELLIGENCE (derived from refreshed indexed topology; source remains authoritative):\n<flows untrusted_data=\"true\">\n" + flow[:3500] + "\n</flows>"
+                context = context[:max(0, self.MAX_REREVIEW_CONTEXT_CHARS - len(flow_block))] + flow_block
+            except Exception:  # noqa: BLE001 - missing flow projection remains explicit in core differential context
+                context = context[:max(0, self.MAX_REREVIEW_CONTEXT_CHARS - 42)] + "\n\nCURRENT FLOW INTELLIGENCE: unavailable"
+        return context[:self.MAX_REREVIEW_CONTEXT_CHARS]
 
     def _finding_topology(self, project_id: str, candidate: FindingCandidate) -> list[dict[str, object]]:
         symbol = candidate.location.function

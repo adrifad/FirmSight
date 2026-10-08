@@ -16,6 +16,7 @@ from .i18n import normalize_locale
 from .indexer import FirmwareIndexer
 from .interaction_service import ChatService, YamlService
 from .context_builder import ContextBuilder
+from .flow_service import FlowService
 from .knowledge_base_service import KnowledgeBaseService
 from .knowledge_index_service import KnowledgeIndexService
 from .knowledge_retriever import KnowledgeRetriever
@@ -33,6 +34,7 @@ from .platform_schemas import (
     ChatMessageRead, ChatRequest, ChatResponse, FindingDecisionUpdate, FindingFixVerificationRequest, FindingRead, FindingResolutionUpdate, IndexRead, ProjectSourceSyncRead,
     AISettingsRead, AISettingsUpdate, ProjectCreate, ProjectDirectoryImport, ProjectFileContent, ProjectFileRead, ProjectFilesUpload, ProjectRead, ProjectSourceSyncRequest,
     ReviewCreate, ReviewRead, SymbolRead, TopologyPathRead, TopologyRead, TopologyRelationRead, TopologySymbolRead, AllocationEventRead, YamlGenerateRequest, YamlRead, YamlValidateRequest,
+    FlowIndexRead, FlowScenarioRead, FlowNodeRead, FlowResourceRead, SharedStateRead,
 )
 from .project_service import ProjectService, TopologyDerivationError
 from .review_service import ReviewService
@@ -96,7 +98,8 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
     knowledge_base = KnowledgeBaseService(memory_repository, platform_repository, settings_service)
     knowledge_index = knowledge_index_override or KnowledgeIndexService(memory_repository)
     knowledge_retriever = KnowledgeRetriever(memory_repository, platform_repository, language_resolver=lambda: settings_service.config().language)
-    context_builder = ContextBuilder(platform_repository, knowledge_retriever, projects.lifetime_service)
+    flow_service = FlowService(platform_repository)
+    context_builder = ContextBuilder(platform_repository, knowledge_retriever, projects.lifetime_service, flow_service)
     resolve_provider = provider_resolver or settings_service.provider
     intelligence = IntelligenceService(memory_repository, platform_repository, projects, resolve_provider, language_resolver=lambda: settings_service.config().language)
     reviews = ReviewService(
@@ -108,6 +111,7 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         review_context_resolver=lambda: settings_service.config().review_context_chars,
         review_parallel_resolver=lambda: settings_service.config().review_parallel_requests,
         context_builder=context_builder,
+        flow_service=flow_service,
         knowledge_base=knowledge_base,
         knowledge_index=knowledge_index,
         language_resolver=lambda: settings_service.config().language,
@@ -128,6 +132,7 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         knowledge_base=knowledge_base,
         knowledge_index=knowledge_index,
         reviews=reviews,
+        flows=flow_service,
     )
 
     def get_service() -> MemoryService:
@@ -232,6 +237,42 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
     @app.get("/api/projects/{project_id}/topology/path", response_model=TopologyPathRead)
     def project_topology_path(project_id: str, symbol: str, depth: int = Query(default=1, ge=0, le=3), cap: int = Query(default=64, ge=1, le=128)) -> TopologyPathRead:
         return TopologyPathRead.model_validate(projects.topology_path(project_id, symbol, depth=depth, cap=cap))
+
+    @app.get("/api/projects/{project_id}/flows", response_model=FlowIndexRead)
+    def project_flows(project_id: str) -> FlowIndexRead:
+        projects.get(project_id)
+        return flow_service.build(project_id)
+
+    @app.get("/api/projects/{project_id}/flows/{flow_id}", response_model=FlowScenarioRead)
+    def project_flow(project_id: str, flow_id: str) -> FlowScenarioRead:
+        projects.get(project_id)
+        match = next((item for item in flow_service.build(project_id).scenarios if item.id == flow_id), None)
+        if match is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Flow scenario not found")
+        return match
+
+    @app.get("/api/projects/{project_id}/flow/paths-to-symbol", response_model=list[FlowScenarioRead])
+    def flow_paths_to_symbol(project_id: str, symbol: str, file: str | None = None, cap: int = Query(default=32, ge=1, le=64)) -> list[FlowScenarioRead]:
+        projects.get(project_id)
+        return flow_service.paths_to_symbol(project_id, symbol, cap, file)
+
+    @app.get("/api/projects/{project_id}/flow/entry-points", response_model=list[FlowNodeRead])
+    def flow_entry_points(project_id: str) -> list[FlowNodeRead]:
+        projects.get(project_id)
+        index = flow_service.build(project_id)
+        unique = {scenario.nodes[0].id: scenario.nodes[0] for scenario in index.scenarios if scenario.nodes}
+        return list(unique.values())
+
+    @app.get("/api/projects/{project_id}/flow/resources", response_model=list[FlowResourceRead])
+    def flow_resources(project_id: str) -> list[FlowResourceRead]:
+        projects.get(project_id)
+        return flow_service.build(project_id).resources
+
+    @app.get("/api/projects/{project_id}/flow/shared-state", response_model=list[SharedStateRead])
+    def flow_shared_state(project_id: str) -> list[SharedStateRead]:
+        projects.get(project_id)
+        return flow_service.build(project_id).shared_state
 
     @app.get("/api/projects/{project_id}/knowledge/documents", response_model=list[KnowledgeDocumentRead])
     def knowledge_documents(project_id: str) -> list[KnowledgeDocumentRead]:

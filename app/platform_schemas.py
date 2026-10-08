@@ -163,6 +163,72 @@ class TopologyPathRead(BaseModel):
     fingerprint: str = ""
 
 
+class FlowNodeRead(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    kind: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=240)
+    symbol_id: str | None = None
+    file: str | None = Field(default=None, max_length=4000)
+    line: int | None = Field(default=None, ge=1)
+    relation_state: Literal["OBSERVED", "INFERRED", "UNKNOWN"] = "OBSERVED"
+
+
+class FlowEdgeRead(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    source_id: str = Field(min_length=1, max_length=160)
+    target_id: str = Field(min_length=1, max_length=160)
+    kind: str = Field(min_length=1, max_length=48)
+    relation_state: Literal["OBSERVED", "INFERRED", "UNKNOWN"] = "OBSERVED"
+    confidence: float = Field(ge=0, le=1)
+    file: str | None = Field(default=None, max_length=4000)
+    line: int | None = Field(default=None, ge=1)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class FlowScenarioRead(BaseModel):
+    id: str = Field(min_length=1, max_length=160)
+    project_id: str
+    entry_kind: str
+    entry_symbol_id: str
+    entry_name: str
+    title: str
+    nodes: list[FlowNodeRead] = Field(default_factory=list, max_length=80)
+    edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=120)
+    data_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+    async_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=32)
+    unresolved_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=32)
+    path: list[str] = Field(default_factory=list, max_length=32)
+    max_depth_reached: bool = False
+    confidence: float = Field(ge=0, le=1)
+    source_snapshot_hash: str = ""
+    topology_fingerprint: str = ""
+
+
+class FlowResourceRead(BaseModel):
+    identity: str
+    kind: str
+    operations: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+    functions: list[str] = Field(default_factory=list, max_length=64)
+
+
+class SharedStateRead(BaseModel):
+    name: str
+    readers: list[str] = Field(default_factory=list, max_length=64)
+    writers: list[str] = Field(default_factory=list, max_length=64)
+    accesses: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+
+
+class FlowIndexRead(BaseModel):
+    project_id: str
+    scenarios: list[FlowScenarioRead] = Field(default_factory=list, max_length=128)
+    resources: list[FlowResourceRead] = Field(default_factory=list, max_length=128)
+    shared_state: list[SharedStateRead] = Field(default_factory=list, max_length=128)
+    unresolved_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=128)
+    truncated: bool = False
+    source_snapshot_hash: str = ""
+    topology_fingerprint: str = ""
+
+
 class IndexRead(BaseModel):
     project_id: str
     file_count: int

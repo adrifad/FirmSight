@@ -46,6 +46,26 @@ topology, a suspicious sink, or a narrative path cannot establish reachability.
 When the relevant path, topology, mitigation coverage, or source mapping cannot
 be established, the result is INCONCLUSIVE.
 
+## Flow Intelligence
+
+FirmSight builds bounded execution scenarios from indexed source and topology
+facts before asking an AI role to reason about behavior. The project-scoped
+`GET /api/projects/{id}/flows` API and Architecture page expose observed entry
+paths, matched queue transitions, direct global readers/writers, resource
+operations, source/sink/validation facts, unresolved edges, and snapshot
+fingerprints. Path, entry-point, resource, and shared-state queries are also
+available under `/flow/` routes.
+
+The flow projection does not execute firmware and does not infer a complete
+control-flow graph. Calls and statically resolved registrations are observed;
+ambiguous targets remain inferred or unresolved. Queue paths connect only when
+the same handle identity is visible. Data facts cover a small source-indexed
+API and predicate vocabulary, not general taint or alias analysis. Traversal
+and context are bounded, and truncation is reported. Review, chat, findings, and
+Fix Verification can use this flow evidence while current source remains the
+highest authority. Unsupported or unresolved paths should lower confidence or
+remain inconclusive rather than be invented.
+
 ## Run the full stack
 
 Install Python dependencies once:

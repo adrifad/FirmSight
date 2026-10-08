@@ -153,10 +153,12 @@ def capture_finding_baseline(
     *,
     source_snapshot_hash: str,
     topology_fingerprint: str | None = None,
+    flow_scenarios: Any | None = None,
 ) -> FindingVerificationBaseline:
     """Persist bounded evidence from the source/index state that created a finding."""
     files_by_path = {str(item["path"]): item for item in files}
     symbol_by_id = {str(item.get("id")): item for item in symbols}
+    relation_by_id = {str(item.get("id")): item for item in relations}
     nodes, edges = _connected_symbols(finding, symbols, relations, depth=3)
     stored_files: list[FindingBaselineFile] = []
     remaining = MAX_FINDING_BASELINE_CHARS
@@ -219,7 +221,30 @@ def capture_finding_baseline(
         edge for relation in edges
         if (edge := _edge_from_relation(relation, symbol_by_id)) is not None
     ][:48]
-    relevant_paths, path_truncated = _baseline_relevant_paths(finding, symbols, relations)
+    flow_truncated = bool(getattr(flow_scenarios, "truncated", False)) if flow_scenarios is not None else False
+    relevant_paths, path_truncated = ([], flow_truncated) if flow_scenarios is not None else _baseline_relevant_paths(finding, symbols, relations)
+    if flow_scenarios is not None:
+        # Reuse FlowService's entry-rooted, bounded enumeration for new finding
+        # baselines. Retain the legacy extractor only as a compatibility path
+        # for callers/tests that do not supply the shared projection.
+        indexed_paths: list[FindingBaselinePath] = []
+        scenarios = getattr(flow_scenarios, "scenarios", flow_scenarios)
+        for scenario in scenarios[:MAX_BASELINE_PATHS + 1]:
+            nodes = getattr(scenario, "nodes", [])
+            function_nodes = [node for node in nodes if getattr(node, "kind", "") == "FUNCTION"]
+            if not any(getattr(node, "file", None) == finding.location.file and getattr(node, "name", None) == finding.location.function for node in function_nodes):
+                continue
+            indexed_paths.append(FindingBaselinePath(
+                entry_name=str(getattr(scenario, "entry_name", "unknown")),
+                entry_file=str(getattr(function_nodes[0], "file", "") or "") if function_nodes else "",
+                entry_relation=str(getattr(scenario, "entry_kind", "UNKNOWN")),
+                path_symbols=[f"{getattr(node, 'file', '')}:{getattr(node, 'name', '')}" for node in function_nodes[:12]],
+                    edges=[converted for edge in getattr(scenario, "edges", [])[:12]
+                           if (converted := _edge_from_relation(relation_by_id.get(edge.id, {}), symbol_by_id)) is not None],
+                ))
+        if indexed_paths:
+            relevant_paths = indexed_paths[:MAX_BASELINE_PATHS]
+            path_truncated = flow_truncated or len(indexed_paths) > MAX_BASELINE_PATHS
     topology_truncated = path_truncated or len(edges) >= 48
     fingerprint_payload = {
         "symbols": [item.model_dump(mode="json") for item in baseline_symbols],

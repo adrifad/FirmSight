@@ -251,15 +251,16 @@ def test_ownership_escape_only_change_alters_stored_topology_fingerprint(tmp_pat
     assert _fingerprint(api, project_id) == fp_escape
 
     # Removing only the ownership escape changes the fingerprint, with every
-    # non-lifetime relation and allocation fact unchanged.
+    # non-lifetime topology relation and allocation fact unchanged. Bounded
+    # syntax-level data-flow facts are compared separately from topology.
     _write(directory / "src" / "main.c", _SOURCE_WITHOUT_ESCAPE)
     assert api.post(f"/api/projects/{project_id}/sync-source").status_code == 200
     assert _fingerprint(api, project_id) != fp_escape
 
     relations_without = _relations(api, project_id)
     assert any(relation[0] == "RETURNS_OWNERSHIP" for relation in relations_escape)
-    non_lifetime_with_escape = [relation for relation in relations_escape if relation[0] not in {"RETURNS_OWNERSHIP", "STORES_OWNERSHIP", "PASSES_TO_UNKNOWN"}]
-    non_lifetime_without = [relation for relation in relations_without if relation[0] not in {"RETURNS_OWNERSHIP", "STORES_OWNERSHIP", "PASSES_TO_UNKNOWN"}]
+    non_lifetime_with_escape = [relation for relation in relations_escape if relation[0] not in {"RETURNS_OWNERSHIP", "STORES_OWNERSHIP", "PASSES_TO_UNKNOWN", "RETURNS_VALUE"}]
+    non_lifetime_without = [relation for relation in relations_without if relation[0] not in {"RETURNS_OWNERSHIP", "STORES_OWNERSHIP", "PASSES_TO_UNKNOWN", "RETURNS_VALUE"}]
     assert non_lifetime_without == non_lifetime_with_escape
 
     # Changing it back restores the same deterministic fingerprint.
