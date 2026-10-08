@@ -19,13 +19,14 @@ from fastapi import HTTPException, status
 
 from .ai_provider import AIProvider, ProviderEvent, structured_response
 from .fix_verification import build_differential_context, capture_finding_baseline, validate_fix_verification
+from .flow_review_service import FlowReviewPlanner
 from .i18n import message as msg
 from .i18n import normalize_locale
 from .platform_repository import PlatformRepository
 from .prompts import FIX_VERIFIER_SYSTEM, FIX_VERIFIER_PROMPT_VERSION, INVESTIGATOR_SYSTEM, INVESTIGATOR_PROMPT_VERSION, VERIFIER_SYSTEM, VERIFIER_PROMPT_VERSION, with_language
 from .platform_schemas import (
     FindingCandidate, FindingClassification, FindingDecision, FindingDecisionUpdate, FindingRead, FindingRemediationStatus,
-    FindingResolution, FindingResolutionUpdate, FindingVerification, FixVerificationResult, InvestigatorResult, ProjectSourceType, ReviewCacheEnvelope, ReviewCreate, ReviewOutputBudgetSnapshot, ReviewRead, ReviewUnitSegment, ReviewUnitState, VerifierResult,
+    FindingResolution, FindingResolutionUpdate, FindingVerification, FixVerificationResult, FlowReviewUnit, InvestigatorResult, ProjectSourceType, ReviewCacheEnvelope, ReviewCreate, ReviewCoverageRead, ReviewOutputBudgetSnapshot, ReviewRead, ReviewUnitSegment, ReviewUnitState, ReviewUnitSummary, VerifierResult,
 )
 from .project_service import ProjectService, now
 from .service import MemoryService
@@ -80,6 +81,15 @@ class ReviewUnit:
     segments: list[ReviewUnitSegment]
     unit_id: str
     label: str
+    unit_kind: str = "ORPHAN_SOURCE"
+    scenario_id: str | None = None
+    entry_name: str | None = None
+    flow_symbols: list[str] | None = None
+    flow_files: list[str] | None = None
+    flow_fingerprint: str = ""
+    truncated: bool = False
+    unresolved_count: int = 0
+    source_ranges: list[tuple[str, int, int]] | None = None
 
 
 # Backwards-compatible name used by existing callers/tests.
@@ -154,7 +164,7 @@ class ReviewService:
         (3_200, 30_000),
     )
     DEFAULT_SOURCE_CHARS_FOR_BUDGET = 20_000
-    REVIEW_ENGINE_VERSION = "review-engine-v2"
+    REVIEW_ENGINE_VERSION = "review-engine-v3-flow-first"
     # Focus profiles are planning hints only. They prioritize relevant indexed
     # symbols and paths, but the Investigator remains the sole source of
     # findings. Terms are normalized below so `error_handling` and
@@ -338,6 +348,10 @@ class ReviewService:
             "scope": review.scope,
             "focus": list(review.focus),
             "unit_id": batch.unit_id,
+            "unit_kind": batch.unit_kind,
+            "scenario_id": batch.scenario_id,
+            "flow_fingerprint": batch.flow_fingerprint,
+            "truncated": batch.truncated,
             "segments": [item.model_dump(mode="json") for item in batch.segments],
             "investigator_model": getattr(investigator, "model", ""),
             "verifier_model": getattr(verifier, "model", ""),
@@ -363,6 +377,248 @@ class ReviewService:
     def _review_context_chars(self) -> int:
         value = self.review_context_resolver()
         return value if value in REVIEW_CONTEXT_CHAR_OPTIONS else DEFAULT_REVIEW_CONTEXT_CHARS
+
+    @staticmethod
+    def _review_unit_summary(batch: ReviewContextBatch) -> ReviewUnitSummary:
+        return ReviewUnitSummary(
+            unit_id=batch.unit_id, unit_kind=batch.unit_kind, title=batch.label[:480],
+            scenario_id=batch.scenario_id, entry_name=batch.entry_name,
+            files=(batch.flow_files or batch.files)[:32], symbol_count=len(batch.flow_symbols or []),
+            unresolved_count=batch.unresolved_count, truncated=batch.truncated,
+        )
+
+    def _review_coverage(self, batches: list[ReviewContextBatch], raw_files: list[dict[str, str]]) -> ReviewCoverageRead:
+        eligible = {str(item["path"]): str(item["content"]) for item in raw_files if FlowReviewPlanner._reviewable(item)}
+        ranges: dict[str, dict[str, list[tuple[int, int]]]] = {"FLOW": {}, "FALLBACK": {}}
+        for batch in batches:
+            key = "FALLBACK" if batch.unit_kind == "ORPHAN_SOURCE" else "FLOW"
+            if batch.source_ranges is not None:
+                for path, start, end in batch.source_ranges:
+                    ranges[key].setdefault(path, []).append((start, end))
+            else:
+                for segment in batch.segments:
+                    content = eligible.get(segment.file)
+                    if content is None:
+                        continue
+                    lines = content.splitlines(keepends=True)
+                    start = sum(len(line) for line in lines[:segment.line_start - 1])
+                    end = sum(len(line) for line in lines[:segment.line_end])
+                    ranges[key].setdefault(segment.file, []).append((start, end))
+
+        def union_size(items: list[tuple[int, int]], limit: int) -> int:
+            ordered = sorted((max(0, start), min(limit, end)) for start, end in items if end > start)
+            total = 0
+            left = right = -1
+            for start, end in ordered:
+                if left < 0:
+                    left, right = start, end
+                elif start <= right:
+                    right = max(right, end)
+                else:
+                    total += right - left
+                    left, right = start, end
+            return total + (right - left if left >= 0 else 0)
+
+        total_chars = sum(len(content) for content in eligible.values())
+        flow_chars = sum(union_size(ranges["FLOW"].get(path, []), len(content)) for path, content in eligible.items())
+        fallback_chars = sum(union_size(ranges["FALLBACK"].get(path, []), len(content)) for path, content in eligible.items())
+        covered_chars = sum(union_size([*ranges["FLOW"].get(path, []), *ranges["FALLBACK"].get(path, [])], len(content)) for path, content in eligible.items())
+        total_segments = sum(len(self._source_segments({"path": path, "content": content})) for path, content in eligible.items())
+        return ReviewCoverageRead(
+            total_source_segments=total_segments, total_source_chars=total_chars,
+            flow_covered_chars=flow_chars, fallback_covered_chars=fallback_chars,
+            source_coverage_percent=covered_chars * 100 / total_chars if total_chars else 0,
+            flow_coverage_percent=flow_chars * 100 / total_chars if total_chars else 0,
+            flow_unit_count=sum(batch.unit_kind != "ORPHAN_SOURCE" for batch in batches),
+            fallback_unit_count=sum(batch.unit_kind == "ORPHAN_SOURCE" for batch in batches),
+            truncated_scenarios=sum(batch.truncated and batch.unit_kind != "ORPHAN_SOURCE" for batch in batches),
+            unresolved_flow_regions=sum(batch.unresolved_count for batch in batches if batch.unit_kind != "ORPHAN_SOURCE"),
+        )
+
+    @staticmethod
+    def _investigator_request(review: ReviewRead | ReviewCreate, batch: ReviewContextBatch, number: int, total: int) -> str:
+        return (
+            f"Required JSON Schema:\n{json.dumps(InvestigatorResult.model_json_schema(), ensure_ascii=False)}\n\n"
+            f"Review scope: {review.scope}\nFocus: {', '.join(review.focus)}\n"
+            f"Review unit {number}/{total}: {batch.unit_kind} — {batch.label}. Treat a FLOW unit as one bounded firmware execution scenario with cross-file source; treat ORPHAN_SOURCE as source not connected to a deterministically observed entry-rooted flow. Return at most 1 high-confidence root-cause candidate from this unit; return an empty findings list if none qualify. Keep the title, summary, runtime scenario, impact, and recommendation concise.\n\n{batch.context}"
+        )
+
+    def _review_units(self, project_id: str, project_name: str, focus: list[str], raw_files: list[dict[str, str]], *, context_limit_chars: int | None = None, investigator_budget: int | str | None = None) -> list[ReviewContextBatch]:
+        """Plan flow scenarios first, then review only source not covered by them.
+
+        Keep ``_context_batches`` as the compatibility/fallback implementation
+        for callers without FlowService and for existing unit-level coverage
+        tests. The active product path consumes FlowReviewPlanner units.
+        """
+        flow_service = getattr(self, "flow_service", None)
+        if flow_service is None:
+            return self._context_batches(project_id, project_name, focus, raw_files, context_limit_chars=context_limit_chars, investigator_budget=investigator_budget)
+        context_limit = context_limit_chars if context_limit_chars in REVIEW_CONTEXT_CHAR_OPTIONS else self._review_context_chars()
+        source_budget = min(10_000, max(2_000, context_limit - 5_000))
+        planned = FlowReviewPlanner(self.repository, flow_service).plan(project_id, raw_files, source_budget=source_budget)
+        symbols_by_id = {str(item["id"]): item for item in self.repository.list_indexed_symbols(project_id)}
+        result: list[ReviewContextBatch] = []
+        for unit in planned:
+            source_parts = [
+                f'<source path="{part.file}" lines="{part.line_start}-{part.line_end}" symbol="{part.symbol or "unknown"}" hash="{part.content_hash}">\n{part.content}\n</source>'
+                for part in unit.source_segments
+            ]
+            symbol_names = [str(symbols_by_id[item]["name"]) for item in unit.symbol_ids if item in symbols_by_id]
+            path_edges = "\n".join(f'{symbols_by_id.get(edge.source_id, {}).get("name", edge.source_id)} -[{edge.kind}/{edge.relation_state}]-> {symbols_by_id.get(edge.target_id, {}).get("name", edge.target_id)} @ {edge.file}:{edge.line}' for edge in unit.execution_edges) or "none"
+            async_lines = [f'{edge.kind} {edge.metadata.get("resource", "unknown resource")} @ {edge.file}:{edge.line} [{edge.relation_state}]' for edge in unit.async_edges]
+            data_lines = [f'{edge.kind} {edge.metadata.get("api", edge.metadata.get("source_identifier", ""))} {edge.metadata.get("identifiers", edge.metadata.get("arguments", ""))} @ {edge.file}:{edge.line} [{edge.relation_state}]' for edge in unit.data_edges]
+            resource_lines = [f'{edge.kind} {edge.metadata.get("api", "")} resource={edge.metadata.get("resource", "unresolved")} operation={edge.metadata.get("operation", "unknown")} @ {edge.file}:{edge.line} [{edge.relation_state}]' for edge in unit.resource_edges]
+            unresolved_lines = [f'{edge.kind} target={edge.metadata.get("unresolved_target", "unknown")} @ {edge.file}:{edge.line} [{edge.relation_state}]' for edge in unit.unresolved_edges]
+            validations = [edge for edge in unit.data_edges if edge.kind == "VALIDATES"]
+            sinks = [edge for edge in unit.data_edges if edge.kind == "DATA_SINK"]
+            validation_order = []
+            for sink in sinks:
+                before = [item for item in validations if item.source_id == sink.source_id and self._fact_precedes(unit, item, sink)]
+                validation_order.append(f'{sink.metadata.get("api", "sink")} @ {sink.file}:{sink.line}: ' + (f'earlier indexed predicate(s) at {", ".join(f"{item.file}:{item.line}" for item in before)} (identifier relation still requires source inspection)' if before else "no same-symbol earlier validation fact indexed"))
+            value_flow = self._value_flow_summary(unit)
+            intelligence = "none"
+            if getattr(self, "intelligence", None):
+                intelligence = self.intelligence.review_memory_context(project_id, symbol_names, unit.files, cap=self.MAX_MEMORIES)
+            shared_context = ""
+            if getattr(self, "context_builder", None):
+                built = self.context_builder.build(project_id, " ".join(focus), selected_files=unit.files, symbols=symbol_names, max_chars=min(3_000, max(800, context_limit // 8)))
+                shared_context = f'\nRelevant project context (untrusted retrieved data):\n<retrieved_context untrusted_data="true">\n{built["text"][:3_000]}\n</retrieved_context>'
+            flow_body = (
+                f"FLOW REVIEW UNIT\nKind: {unit.unit_kind}\nScenario: {unit.title}\nEntry: {unit.entry_kind or 'none'} {unit.entry_name or ''}\n"
+                f"Observed execution edges:\n{path_edges}\n"
+                f"Async transitions (not CALLS):\n" + ("\n".join(async_lines) or "none") + "\n"
+                f"Data/value facts:\n" + ("\n".join(data_lines) or "none") + "\n"
+                f"Validation ordering candidates:\n" + ("\n".join(validation_order) or "none indexed") + "\n"
+                f"Value flow v1 (identifier-only; gaps are not inferred):\n{value_flow}\n"
+                f"Resource facts (resource identity preserved):\n" + ("\n".join(resource_lines) or "none") + "\n"
+                f"Unresolved edges:\n" + ("\n".join(unresolved_lines) or "none") + "\n"
+                f"Source coverage: {len(unit.source_segments)} exact source segments; flow fingerprint={unit.flow_fingerprint}; snapshot={unit.source_snapshot_hash}; topology={unit.topology_fingerprint}.\n"
+                "Evidence rule: source excerpts and OBSERVED indexed relations are authoritative. INFERRED/UNKNOWN edges are not proof of reachability. ORPHAN_SOURCE is not known to be entry-reachable.\n"
+                f"Project Intelligence (supporting, subordinate to current source):\n{intelligence or 'none'}\n"
+                f"{shared_context}\nCURRENT SOURCE\n" + "\n\n".join(source_parts)
+            )
+            if len(flow_body) > context_limit:
+                # Source is selected and bounded first. Trim metadata sections
+                # only when retrieved intelligence/context exceeded its cap.
+                flow_body = flow_body[:max(0, context_limit - sum(map(len, source_parts)))] + "\nCURRENT SOURCE\n" + "\n\n".join(source_parts)
+                flow_body = flow_body[:context_limit]
+            segments = [ReviewUnitSegment(file=item.file, line_start=item.line_start, line_end=item.line_end, content_hash=item.content_hash) for item in unit.source_segments]
+            result.append(ReviewContextBatch(
+                context=flow_body, files=unit.files, segments=segments, unit_id=unit.id,
+                label=unit.title, unit_kind=unit.unit_kind, scenario_id=unit.scenario_id,
+                entry_name=unit.entry_name, flow_symbols=symbol_names, flow_files=unit.files,
+                flow_fingerprint=unit.flow_fingerprint, truncated=unit.truncated,
+                unresolved_count=len(unit.unresolved_edges),
+                source_ranges=[(part.file, part.start_offset, part.end_offset) for part in unit.source_segments],
+            ))
+        return result
+
+    @staticmethod
+    def _value_flow_summary(unit: FlowReviewUnit) -> str:
+        edges = [edge for edge in unit.data_edges if edge.kind in {"UNTRUSTED_INPUT", "PARAMETER", "ASSIGNS", "PROPAGATES_ARGUMENT", "RETURNS_VALUE", "CAPTURES_RETURN", "VALIDATES", "DATA_SINK"}]
+        if not edges:
+            return "No identifier-only source-to-sink chain is established."
+        observed = [edge for edge in edges if edge.relation_state == "OBSERVED"]
+        propagation = [edge for edge in observed if edge.kind == "PROPAGATES_ARGUMENT"]
+        sources = [edge for edge in observed if edge.kind == "UNTRUSTED_INPUT" and edge.metadata.get("output_identifier")]
+        sinks = [edge for edge in observed if edge.kind == "DATA_SINK"]
+        lines: list[str] = []
+        for source in sources[:8]:
+            identifier, symbol_id = source.metadata.get("output_identifier", ""), source.source_id
+            symbol_names = {segment.symbol_id: segment.symbol for segment in unit.source_segments if segment.symbol_id and segment.symbol}
+            chain = [f'{source.metadata.get("source_kind", "external input")}:{identifier} @ {source.file}:{source.line}']
+            return_identifier = source.metadata.get("return_identifier")
+            direct_sink = next((edge for edge in sinks if edge.source_id == symbol_id and identifier in edge.metadata.get("arguments", "").split(",")), None)
+            if direct_sink:
+                chain.append(f'{direct_sink.metadata.get("api", "sink")}({direct_sink.metadata.get("arguments", "?")}) @ {direct_sink.file}:{direct_sink.line}')
+                validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, direct_sink) and (identifier in edge.metadata.get("identifiers", "").split(",") or bool(return_identifier and return_identifier in edge.metadata.get("identifiers", "").split(",")))]
+                chain.append("VALIDATED_BEFORE_SINK: " + ", ".join(f'{edge.file}:{edge.line}' for edge in validations) if validations else "NO_TRACKED_VALIDATION_BEFORE_SINK")
+                lines.append(" → ".join(chain))
+                continue
+            visited: set[tuple[str, str]] = set()
+            for _ in range(6):
+                pair = (symbol_id, identifier)
+                if pair in visited:
+                    break
+                visited.add(pair)
+                step = next((edge for edge in propagation if edge.source_id == symbol_id and edge.metadata.get("source_identifier") == identifier), None)
+                if step is None:
+                    break
+                identifier = step.metadata.get("target_parameter", "")
+                symbol_id = step.target_id
+                chain.append(f'{symbol_names.get(symbol_id, symbol_id)}:{identifier} @ {step.file}:{step.line}')
+                sink = next((edge for edge in sinks if edge.source_id == symbol_id and identifier in edge.metadata.get("arguments", "").split(",")), None)
+                if sink:
+                    chain.append(f'{sink.metadata.get("api", "sink")}({sink.metadata.get("arguments", "?")}) @ {sink.file}:{sink.line}')
+                    return_companion = return_identifier if symbol_id == source.source_id else None
+                    validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, sink) and (identifier in edge.metadata.get("identifiers", "").split(",") or bool(return_companion and return_companion in edge.metadata.get("identifiers", "").split(",")))]
+                    chain.append("VALIDATED_BEFORE_SINK: " + ", ".join(f'{edge.file}:{edge.line}' for edge in validations) if validations else "NO_TRACKED_VALIDATION_BEFORE_SINK")
+                    lines.append(" → ".join(chain))
+                    break
+        if not lines:
+            for edge in observed[:24]:
+                metadata = edge.metadata
+                if edge.kind == "PROPAGATES_ARGUMENT":
+                    step = f'{metadata.get("source_identifier", "?")} → {metadata.get("call", edge.target_id)}:{metadata.get("target_parameter", "parameter")}'
+                elif edge.kind == "UNTRUSTED_INPUT":
+                    step = f'{metadata.get("source_kind", "external input")}:{metadata.get("output_identifier", "unknown output")}'
+                elif edge.kind == "DATA_SINK":
+                    step = f'{metadata.get("api", "sink")}({metadata.get("arguments", "unknown arguments")})'
+                else:
+                    step = f'{edge.kind}:{metadata.get("identifier", metadata.get("source_identifier", "unknown value"))}'
+                lines.append(f'{step} @ {edge.file}:{edge.line} [{edge.relation_state}]')
+        return "\n".join(lines[:16]) or "Indexed value facts exist, but identifier continuity to a sink is not established."
+
+    @staticmethod
+    def _fact_precedes(unit: FlowReviewUnit, validation, sink) -> bool:
+        if validation.file != sink.file:
+            return False
+        if (validation.line or 0) < (sink.line or 0):
+            return True
+        if validation.line != sink.line:
+            return False
+        predicate = validation.metadata.get("predicate", "")
+        api = sink.metadata.get("api", "")
+        body = next((segment.content for segment in unit.source_segments if segment.symbol_id == validation.source_id and segment.file == validation.file and segment.line_start <= validation.line <= segment.line_end), "")
+        predicate_at = body.find(predicate) if predicate else -1
+        sink_match = re.search(rf"\b{re.escape(api)}\s*\(", body) if api else None
+        return predicate_at >= 0 and sink_match is not None and predicate_at < sink_match.start()
+
+    def _cross_flow_support(self, project_id: str, candidate: FindingCandidate, batch: ReviewContextBatch) -> str:
+        flow_service = getattr(self, "flow_service", None)
+        if flow_service is None or not batch.unit_kind.startswith("FLOW"):
+            return ""
+        scenarios = flow_service.paths_to_symbol(project_id, candidate.location.function or "", cap=4, file=candidate.location.file)
+        if len(scenarios) <= 1:
+            return ""
+        raw = {item["path"]: item["content"] for item in self.repository.raw_files(project_id)}
+        symbols = {str(item["id"]): item for item in self.repository.list_indexed_symbols(project_id)}
+        parts = ["\nOther observed bounded paths reaching this candidate symbol (cross-flow verification):"]
+        for scenario in scenarios[:3]:
+            ids = self._scenario_symbol_ids(scenario)
+            parts.append(f'{scenario.entry_kind} {scenario.entry_name}: {" -> ".join(scenario.path)}')
+            remaining = 4_000
+            for symbol_id in ids:
+                symbol = symbols.get(symbol_id)
+                if not symbol or symbol.get("file") not in raw:
+                    continue
+                lines = raw[symbol["file"]].splitlines(keepends=True)
+                excerpt = "".join(lines[max(0, int(symbol.get("line_start") or 1) - 1):int(symbol.get("line_end") or 1)])
+                excerpt = excerpt[:remaining]
+                if excerpt:
+                    parts.append(f'<source path="{symbol["file"]}" lines="{symbol["line_start"]}-{symbol["line_end"]}">\n{excerpt}\n</source>')
+                    remaining -= len(excerpt)
+                if remaining <= 0:
+                    break
+        return "\n".join(parts)[:8_000]
+
+    @staticmethod
+    def _scenario_symbol_ids(scenario) -> list[str]:
+        ids = [scenario.edges[0].source_id] if scenario.edges else [scenario.entry_symbol_id]
+        for edge in scenario.edges:
+            if edge.source_id == ids[-1]:
+                ids.append(edge.target_id)
+        return list(dict.fromkeys(ids))
 
     def _diagnostic_sink(
         self,
@@ -434,15 +690,17 @@ class ReviewService:
         review_id = f"REV-{uuid4().hex[:10].upper()}"
         context_chars = self._review_context_chars()
         source_snapshot_hash = ProjectService.snapshot_hash(raw_files)
-        batches = self._context_batches(project_id, project.name, request.focus, raw_files, context_limit_chars=context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
+        batches = self._review_units(project_id, project.name, request.focus, raw_files, context_limit_chars=context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
         if not batches:
             raise self._error(status.HTTP_409_CONFLICT, "error.no_reviewable_files")
         context_files = list(dict.fromkeys(path for batch in batches for path in batch.files))
+        source_coverage = self._review_coverage(batches, raw_files)
         rereview_count = len(self._rereview_candidates(project_id))
         progress = [
             self._t("review.queued_scope", scope=request.scope, focus=', '.join(request.focus)),
             self._t("review.indexed", files=indexed.file_count, symbols=indexed.symbol_count),
             self._t("review.prepared_batches", batches=len(batches), files=len(context_files), chars=context_chars),
+            self._t("review.source_coverage", source=source_coverage.source_coverage_percent, flow=source_coverage.flow_coverage_percent, fallback=source_coverage.fallback_unit_count),
         ]
         if rereview_count:
             progress.append(self._t("review.queued_rereview", count=rereview_count, s=self._plural(rereview_count, "")))
@@ -453,6 +711,8 @@ class ReviewService:
             "scope": request.scope,
             "focus": request.focus,
             "context_files": context_files,
+            "review_units": [self._review_unit_summary(batch).model_dump(mode="json") for batch in batches],
+            "source_coverage": source_coverage.model_dump(mode="json"),
             "context_chars": context_chars,
             "source_snapshot_hash": source_snapshot_hash,
             "total_batches": len(batches),
@@ -735,7 +995,7 @@ class ReviewService:
             progress,
         )
         self._revalidate_intelligence(review.project_id, progress)
-        batches = self._context_batches(review.project_id, project.name, review.focus, raw_files, context_limit_chars=review.context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
+        batches = self._review_units(review.project_id, project.name, review.focus, raw_files, context_limit_chars=review.context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
         if not batches:
             raise RuntimeError("No reviewable firmware source files were available for AI context")
         if retry_target_batches is None:
@@ -772,7 +1032,7 @@ class ReviewService:
                 with request_slots:
                     result = structured_response(
                         investigator, InvestigatorResult, with_language(INVESTIGATOR_SYSTEM, self._locale()),
-                        f"Required JSON Schema:\n{json.dumps(InvestigatorResult.model_json_schema(), ensure_ascii=False)}\n\nReview scope: {review.scope}\nFocus: {', '.join(review.focus)}\nThis is source batch {batch_number}/{len(batches)}. Return at most 1 high-confidence candidate from this batch; return an empty findings list if none qualify. Keep the title, summary, runtime scenario, impact, and recommendation concise, and include only the evidence and execution steps needed to prove the issue.\n\n{batch.context}",
+                        self._investigator_request(review, batch, batch_number, len(batches)),
                         operation=f"review:{review_id}:investigator:batch-{batch_number}",
                         on_event=self._diagnostic_sink(review_id, role="investigator", batch_number=batch_number, total_batches=len(batches), file_count=len(batch.files), execution_attempt=review.execution_attempt, event_collector=events),
                     )
@@ -904,7 +1164,7 @@ class ReviewService:
                 with request_slots:
                     result = structured_response(
                         verifier, VerifierResult, with_language(VERIFIER_SYSTEM, self._locale()),
-                        f"Required JSON Schema:\n{json.dumps(VerifierResult.model_json_schema(), ensure_ascii=False)}\n\nCandidate JSON:\n{json.dumps(candidate.model_dump(mode='json'), ensure_ascii=False)}\n\nRelevant project context (source batch {batch_number}/{len(batches)}):\n{batch.context}",
+                        f"Required JSON Schema:\n{json.dumps(VerifierResult.model_json_schema(), ensure_ascii=False)}\n\nCandidate JSON:\n{json.dumps(candidate.model_dump(mode='json'), ensure_ascii=False)}\n\nRelevant bounded flow/source context (review unit {batch_number}/{len(batches)}):\n{batch.context}{self._cross_flow_support(review.project_id, candidate, batch)}",
                         operation=f"review:{review_id}:verifier:batch-{batch_number}:candidate-{candidate_number}",
                         on_event=self._diagnostic_sink(review_id, role="verifier", batch_number=batch_number, total_batches=len(batches), file_count=len(batch.files), execution_attempt=review.execution_attempt, event_collector=events),
                     )

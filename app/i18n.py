@@ -56,6 +56,10 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Prepared {batches} full-coverage source batches from {files} reviewable files (up to {chars:,} characters per AI request)",
         "Menyiapkan {batches} batch sumber cakupan-penuh dari {files} berkas yang dapat direview (maksimal {chars:,} karakter per permintaan AI)",
     ),
+    "review.source_coverage": (
+        "Source coverage: {source:.1f}% total · {flow:.1f}% in observed flows · {fallback} fallback units",
+        "Cakupan sumber: {source:.1f}% total · {flow:.1f}% dalam flow teramati · {fallback} unit fallback",
+    ),
     "review.queued_rereview": (
         "Queued AI recheck for {count} accepted confirmed finding{s} before new discovery",
         "Antrean pemeriksaan ulang AI untuk {count} temuan terkonfirmasi yang diterima sebelum pencarian baru",

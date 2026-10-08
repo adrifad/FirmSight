@@ -114,6 +114,8 @@ class PlatformRepository:
                     execution_progress_json TEXT NOT NULL DEFAULT '{}',
                     execution_attempt INTEGER NOT NULL DEFAULT 1,
                     unit_states_json TEXT NOT NULL DEFAULT '{}',
+                    review_units_json TEXT NOT NULL DEFAULT '[]',
+                    review_coverage_json TEXT NOT NULL DEFAULT '{}',
                     output_budget_json TEXT NOT NULL DEFAULT '{}',
                     error_message TEXT, last_activity_at TEXT,
                     created_at TEXT NOT NULL, completed_at TEXT,
@@ -173,6 +175,8 @@ class PlatformRepository:
             self._ensure_column(conn, "reviews", "execution_progress_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "reviews", "execution_attempt", "INTEGER NOT NULL DEFAULT 1")
             self._ensure_column(conn, "reviews", "unit_states_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "reviews", "review_units_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "reviews", "review_coverage_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "reviews", "output_budget_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "reviews", "error_message", "TEXT")
             self._ensure_column(conn, "reviews", "last_activity_at", "TEXT")
@@ -447,8 +451,8 @@ class PlatformRepository:
     def create_review(self, record: dict[str, Any]) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO reviews(id,project_id,scope,focus_json,context_json,context_chars,source_snapshot_hash,total_batches,validated_batches,unavailable_batches,status,progress_json,execution_progress_json,execution_attempt,unit_states_json,output_budget_json,error_message,last_activity_at,created_at,completed_at) "
-                "VALUES (:id,:project_id,:scope,:focus_json,:context_json,:context_chars,:source_snapshot_hash,:total_batches,:validated_batches,:unavailable_batches,:status,:progress_json,:execution_progress_json,:execution_attempt,:unit_states_json,:output_budget_json,:error_message,:last_activity_at,:created_at,:completed_at)",
+                "INSERT INTO reviews(id,project_id,scope,focus_json,context_json,context_chars,source_snapshot_hash,total_batches,validated_batches,unavailable_batches,status,progress_json,execution_progress_json,execution_attempt,unit_states_json,review_units_json,review_coverage_json,output_budget_json,error_message,last_activity_at,created_at,completed_at) "
+                "VALUES (:id,:project_id,:scope,:focus_json,:context_json,:context_chars,:source_snapshot_hash,:total_batches,:validated_batches,:unavailable_batches,:status,:progress_json,:execution_progress_json,:execution_attempt,:unit_states_json,:review_units_json,:review_coverage_json,:output_budget_json,:error_message,:last_activity_at,:created_at,:completed_at)",
                 {
                     **record,
                     "focus_json": json.dumps(record["focus"]),
@@ -462,6 +466,8 @@ class PlatformRepository:
                     "execution_progress_json": json.dumps(record.get("execution_progress") or {}),
                     "execution_attempt": record.get("execution_attempt", 1),
                     "unit_states_json": json.dumps(record.get("unit_states") or {}),
+                    "review_units_json": json.dumps(record.get("review_units") or []),
+                    "review_coverage_json": json.dumps(record.get("source_coverage") or {}),
                     "output_budget_json": json.dumps(record.get("output_budget_snapshot") or {}),
                     "error_message": record.get("error"),
                     "last_activity_at": record.get("last_activity_at", record.get("created_at")),
@@ -488,6 +494,8 @@ class PlatformRepository:
             record.pop("execution_progress_json", None)
             record.pop("unit_states_json", None)
             record.pop("output_budget_json", None)
+            record.pop("review_units_json", None)
+            record.pop("review_coverage_json", None)
             record.pop("context_json", None)
             record["error"] = record.pop("error_message", None)
             records.append(record)
@@ -498,7 +506,7 @@ class PlatformRepository:
             row = conn.execute("SELECT r.*, (SELECT COUNT(*) FROM findings f WHERE f.review_id=r.id) finding_count FROM reviews r WHERE id=?", (review_id,)).fetchone()
         if not row:
             return None
-        record = dict(row); record["focus"] = json.loads(record.pop("focus_json")); record["context_files"] = json.loads(record.pop("context_json")); record["error"] = record.pop("error_message"); record["progress"] = json.loads(record.pop("progress_json")); raw_execution = record.pop("execution_progress_json", "{}") or "{}"; raw_unit_states = record.pop("unit_states_json", "{}") or "{}"; raw_output_budget = record.pop("output_budget_json", "{}") or "{}";
+        record = dict(row); record["focus"] = json.loads(record.pop("focus_json")); record["context_files"] = json.loads(record.pop("context_json")); record["error"] = record.pop("error_message"); record["progress"] = json.loads(record.pop("progress_json")); raw_execution = record.pop("execution_progress_json", "{}") or "{}"; raw_unit_states = record.pop("unit_states_json", "{}") or "{}"; raw_review_units = record.pop("review_units_json", "[]") or "[]"; raw_coverage = record.pop("review_coverage_json", "{}") or "{}"; raw_output_budget = record.pop("output_budget_json", "{}") or "{}";
         try:
             record["execution_progress"] = json.loads(raw_execution)
         except json.JSONDecodeError:
@@ -507,6 +515,14 @@ class PlatformRepository:
             record["unit_states"] = json.loads(raw_unit_states)
         except json.JSONDecodeError:
             record["unit_states"] = {}
+        try:
+            record["review_units"] = json.loads(raw_review_units)
+        except json.JSONDecodeError:
+            record["review_units"] = []
+        try:
+            record["source_coverage"] = json.loads(raw_coverage)
+        except json.JSONDecodeError:
+            record["source_coverage"] = {}
         try:
             record["output_budget_snapshot"] = json.loads(raw_output_budget)
         except json.JSONDecodeError:

@@ -537,9 +537,11 @@ class FirmwareIndexer:
                 arguments = _call_arguments(body, body.find("(", match.start()))
                 output_index = {"httpd_req_get_url_query_str": 1, "httpd_query_key_value": 2}.get(api, 1)
                 output = _simple_argument_name(arguments[output_index]) if arguments and len(arguments) > output_index else None
+                assignment = re.search(r"(?:\b[A-Za-z_]\w*(?:\s*\*)?\s+)?([A-Za-z_]\w*)\s*=\s*$", body[max(0, match.start() - 100):match.start()])
+                returned = assignment.group(1) if assignment else None
                 self._relation(relations, project_id, "UNTRUSTED_INPUT", source["id"], None, api, path,
                                _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0,
-                               {"api": api, "source_kind": source_kind, **({"output_identifier": output} if output else {})})
+                               {"api": api, "source_kind": source_kind, **({"output_identifier": output} if output else {}), **({"return_identifier": returned} if returned else {})})
         for api in DATA_SINK_APIS:
             for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
                 arguments = _call_arguments(body, body.find("(", match.start()))

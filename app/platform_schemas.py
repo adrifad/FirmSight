@@ -342,12 +342,82 @@ class ReviewUnitState(BaseModel):
     investigator_validated: bool = False
 
 
+class FlowReviewSourceSegment(BaseModel):
+    """Request-time source excerpt used by one deterministic flow review unit."""
+
+    file: str = Field(min_length=1, max_length=4000)
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+    start_offset: int = Field(default=0, ge=0)
+    end_offset: int = Field(default=0, ge=0)
+    content_hash: str = Field(min_length=64, max_length=64)
+    content: str = Field(max_length=24000)
+    symbol_id: str | None = Field(default=None, max_length=240)
+    symbol: str | None = Field(default=None, max_length=240)
+
+
+class FlowReviewUnit(BaseModel):
+    """Bounded, reproducible review package derived from indexed flow facts."""
+
+    id: str = Field(min_length=1, max_length=128)
+    project_id: str = Field(min_length=1, max_length=128)
+    unit_kind: Literal["FLOW", "FLOW_WINDOW", "ORPHAN_SOURCE"]
+    scenario_id: str | None = Field(default=None, max_length=128)
+    title: str = Field(min_length=1, max_length=480)
+    entry_kind: str | None = Field(default=None, max_length=64)
+    entry_symbol_id: str | None = Field(default=None, max_length=240)
+    entry_name: str | None = Field(default=None, max_length=240)
+    symbol_ids: list[str] = Field(default_factory=list, max_length=32)
+    files: list[str] = Field(default_factory=list, max_length=32)
+    source_segments: list[FlowReviewSourceSegment] = Field(default_factory=list, max_length=32)
+    execution_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+    async_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=32)
+    data_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+    resource_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=64)
+    unresolved_edges: list[FlowEdgeRead] = Field(default_factory=list, max_length=32)
+    source_snapshot_hash: str = ""
+    topology_fingerprint: str = ""
+    flow_fingerprint: str = ""
+    truncated: bool = False
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    covered_source_segments: int = Field(default=0, ge=0)
+
+
+class ReviewUnitSummary(BaseModel):
+    """Persisted UI-safe metadata; source content is never stored here."""
+
+    unit_id: str = Field(min_length=1, max_length=128)
+    unit_kind: Literal["FLOW", "FLOW_WINDOW", "ORPHAN_SOURCE"]
+    title: str = Field(min_length=1, max_length=480)
+    scenario_id: str | None = Field(default=None, max_length=128)
+    entry_name: str | None = Field(default=None, max_length=240)
+    files: list[str] = Field(default_factory=list, max_length=32)
+    symbol_count: int = Field(default=0, ge=0)
+    unresolved_count: int = Field(default=0, ge=0)
+    truncated: bool = False
+
+
+class ReviewCoverageRead(BaseModel):
+    total_source_segments: int = Field(default=0, ge=0)
+    total_source_chars: int = Field(default=0, ge=0)
+    flow_covered_chars: int = Field(default=0, ge=0)
+    fallback_covered_chars: int = Field(default=0, ge=0)
+    source_coverage_percent: float = Field(default=0, ge=0, le=100)
+    flow_coverage_percent: float = Field(default=0, ge=0, le=100)
+    flow_unit_count: int = Field(default=0, ge=0)
+    fallback_unit_count: int = Field(default=0, ge=0)
+    truncated_scenarios: int = Field(default=0, ge=0)
+    unresolved_flow_regions: int = Field(default=0, ge=0)
+
+
 class ReviewRead(BaseModel):
     id: str
     project_id: str
     scope: str
     focus: list[str]
     context_files: list[str] = Field(default_factory=list)
+    review_units: list[ReviewUnitSummary] = Field(default_factory=list, max_length=9000)
+    source_coverage: ReviewCoverageRead = Field(default_factory=ReviewCoverageRead)
     context_chars: int = 42_000
     source_snapshot_hash: str | None = None
     total_batches: int = Field(default=0, ge=0)
