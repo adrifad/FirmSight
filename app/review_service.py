@@ -18,6 +18,7 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 
 from .ai_provider import AIProvider, ProviderEvent, structured_response
+from .fix_verification import build_differential_context, validate_fix_verification
 from .i18n import message as msg
 from .i18n import normalize_locale
 from .platform_repository import PlatformRepository
@@ -123,7 +124,7 @@ class ReviewService:
     MAX_MEMORIES = 12
     MAX_YAML_CHARS = 2_000
     MAX_REREVIEW_FINDINGS = 12
-    MAX_REREVIEW_CONTEXT_CHARS = 8_000
+    MAX_REREVIEW_CONTEXT_CHARS = 16_000
     MAX_REREVIEW_CHARS_PER_FILE = 2_400
     RUNNING_STALE_SECONDS = 180
     # FS-FIX-015 REQ-1: the worker refreshes its liveness marker on this period
@@ -668,6 +669,12 @@ class ReviewService:
         current_unit_states: dict[str, ReviewUnitState],
         execution: dict,
     ) -> None:
+        # Keep the indexed baseline in memory before source sync replaces both
+        # the project files and its derived topology.
+        baseline_files = self.repository.raw_files(review.project_id)
+        baseline_symbols = self.repository.list_indexed_symbols(review.project_id)
+        baseline_relations = self.repository.list_source_relations(review.project_id)
+        baseline_allocations = self.repository.list_allocation_events(review.project_id)
         source_refreshed = False
         changed_files: list[str] = []
         if project.source_type is ProjectSourceType.LOCAL_DIRECTORY:
@@ -679,6 +686,7 @@ class ReviewService:
                 progress.append(self._t("review.refresh_failed", detail=error.detail))
             self.repository.update_review(review_id, status="RUNNING", progress=progress)
         raw_files = self.repository.raw_files(review.project_id)
+        changed_files = self._snapshot_changed_files(baseline_files, raw_files)
         current_snapshot_hash = ProjectService.snapshot_hash(raw_files)
         # ``review.diagnostics`` are typed ReviewDiagnosticRead models (not dicts),
         # so use the attribute. Reading it with ``.get`` crashed the retry path
@@ -717,6 +725,10 @@ class ReviewService:
             review.project_id,
             fix_verifier,
             raw_files,
+            baseline_files,
+            baseline_symbols,
+            baseline_relations,
+            baseline_allocations,
             source_refreshed,
             changed_files,
             progress,
@@ -1459,6 +1471,10 @@ class ReviewService:
         project_id: str,
         verifier: AIProvider,
         raw_files: list[dict[str, str]],
+        baseline_files: list[dict[str, str]],
+        baseline_symbols: list[dict[str, object]],
+        baseline_relations: list[dict[str, object]],
+        baseline_allocations: list[dict[str, object]],
         source_refreshed: bool,
         changed_files: list[str],
         progress: list[str],
@@ -1472,6 +1488,9 @@ class ReviewService:
         progress.append(self._t("review.recheck_started", count=len(findings), s=self._plural(len(findings), "")))
         self.repository.update_review(review_id, status="RUNNING", progress=progress)
         timestamp = now()
+        current_symbols = self.repository.list_indexed_symbols(project_id)
+        current_relations = self.repository.list_source_relations(project_id)
+        current_allocations = self.repository.list_allocation_events(project_id)
         for index, finding in enumerate(findings, start=1):
             progress.append(self._t("review.recheck_finding", index=index, count=len(findings), title=finding.title))
             self.repository.update_review(review_id, status="RUNNING", progress=progress)
@@ -1482,11 +1501,17 @@ class ReviewService:
                     FixVerificationResult,
                     with_language(FIX_VERIFIER_SYSTEM, self._locale()),
                     f"Required JSON Schema:\n{json.dumps(FixVerificationResult.model_json_schema(), ensure_ascii=False)}\n\n"
-                    f"Previously accepted confirmed finding:\n{json.dumps(finding.model_dump(mode='json'), ensure_ascii=False)}\n\n"
-                    f"Current source relevant to this finding:\n{self._fix_context(finding, raw_files)}",
+                    + self._fix_context(
+                        finding, baseline_files, raw_files,
+                        baseline_symbols=baseline_symbols, current_symbols=current_symbols,
+                        baseline_relations=baseline_relations, current_relations=current_relations,
+                        baseline_allocations=baseline_allocations, current_allocations=current_allocations,
+                        project_id=project_id,
+                    ),
                     operation=operation,
                     on_event=self._diagnostic_sink(review_id, role="fix-verifier", batch_number=index, total_batches=len(findings), file_count=1),
                 )
+                result = validate_fix_verification(result, raw_files, current_symbols, finding)
             except RuntimeError as error:
                 progress.append(self._t("review.recheck_error", title=finding.title, detail=error))
                 self.repository.update_review(review_id, status="RUNNING", progress=progress)
@@ -1500,10 +1525,13 @@ class ReviewService:
             resolution = FindingResolution.SOLVED if remediation_status is FindingRemediationStatus.VERIFIED_FIXED else FindingResolution.OPEN
             remediation = {
                 "status": remediation_status,
-                "notes": f"AI re-review: {result.notes}",
+                "notes": f"AI re-review: {result.reasoning_summary or 'Current source evidence did not establish a verdict.'}",
                 "verified_at": timestamp,
                 "source_refreshed": source_refreshed,
                 "changed_files": changed_files[:80],
+                "baseline_snapshot_hash": ProjectService.snapshot_hash(baseline_files),
+                "current_snapshot_hash": ProjectService.snapshot_hash(raw_files),
+                "verification": result.model_dump(mode="json"),
             }
             self.repository.update_finding_remediation(
                 finding.id,
@@ -1835,31 +1863,38 @@ class ReviewService:
         if not verifier.available():
             raise self._error(status.HTTP_503_SERVICE_UNAVAILABLE, "error.fix_verify_requires_model")
 
-        _, changed_files = self.projects.refresh_local_directory(project_id, directory_override)
+        before_files = self.repository.raw_files(project_id)
+        before_symbols = self.repository.list_indexed_symbols(project_id)
+        before_relations = self.repository.list_source_relations(project_id)
+        before_allocations = self.repository.list_allocation_events(project_id)
+        self.projects.refresh_local_directory(project_id, directory_override)
         timestamp = now()
-        if not changed_files:
-            remediation = {
-                "status": FindingRemediationStatus.INCONCLUSIVE,
-                "notes": "No indexed source changes were found since the last import. Apply the fix in the local project directory, then verify again.",
-                "verified_at": timestamp,
-                "source_refreshed": True,
-                "changed_files": [],
-            }
-            self.repository.update_finding_remediation(finding_id, remediation, FindingResolution.OPEN, None, project_id)
-            return self.finding(project_id, finding_id)
-
         current_files = self.repository.raw_files(project_id)
+        current_symbols = self.repository.list_indexed_symbols(project_id)
+        current_relations = self.repository.list_source_relations(project_id)
+        current_allocations = self.repository.list_allocation_events(project_id)
+        # Calculate source changes from the indexed snapshots. The sync metadata
+        # list is retained for compatibility but is not verdict authority.
+        changed_files = self._snapshot_changed_files(before_files, current_files)
+        # The metadata result remains useful for API compatibility and sync
+        # diagnostics. The persisted diff is always calculated from indexed
+        # before/after snapshots above.
         try:
             result = structured_response(
                 verifier,
                 FixVerificationResult,
-                FIX_VERIFIER_SYSTEM,
+                with_language(FIX_VERIFIER_SYSTEM, self._locale()),
                 f"Required JSON Schema:\n{json.dumps(FixVerificationResult.model_json_schema(), ensure_ascii=False)}\n\n"
-                f"Previously accepted finding:\n{json.dumps(finding.model_dump(mode='json'), ensure_ascii=False)}\n\n"
-                f"Files changed since the prior source snapshot:\n{json.dumps(changed_files[:80], ensure_ascii=False)}\n\n"
-                f"Current source relevant to this finding:\n{self._fix_context(finding, current_files)}",
+                + self._fix_context(
+                    finding, before_files, current_files,
+                    baseline_symbols=before_symbols, current_symbols=current_symbols,
+                    baseline_relations=before_relations, current_relations=current_relations,
+                    baseline_allocations=before_allocations, current_allocations=current_allocations,
+                    project_id=project_id,
+                ),
                 operation=f"verify-fix:{project_id}:{finding_id}",
             )
+            result = validate_fix_verification(result, current_files, current_symbols, finding)
         except RuntimeError as error:
             raise self._error(status.HTTP_502_BAD_GATEWAY, "error.fix_no_verifier_result") from error
 
@@ -1872,33 +1907,84 @@ class ReviewService:
         resolved_at = timestamp if resolution is FindingResolution.SOLVED else None
         remediation = {
             "status": remediation_status,
-            "notes": result.notes,
+            "notes": result.reasoning_summary or "Current source evidence did not establish a verdict.",
             "verified_at": timestamp,
             "source_refreshed": True,
             "changed_files": changed_files[:80],
+            "baseline_snapshot_hash": ProjectService.snapshot_hash(before_files),
+            "current_snapshot_hash": ProjectService.snapshot_hash(current_files),
+            "verification": result.model_dump(mode="json"),
         }
         self.repository.update_finding_remediation(finding_id, remediation, resolution, resolved_at, project_id)
         return self.finding(project_id, finding_id)
 
-    def _fix_context(self, finding: FindingRead, raw_files: list[dict[str, str]]) -> str:
-        files_by_path = {file["path"]: file["content"] for file in raw_files}
-        paths = [finding.location.file, *(item.file for item in finding.evidence)]
-        excerpts: list[str] = []
-        remaining = self.MAX_REREVIEW_CONTEXT_CHARS
-        for path in dict.fromkeys(paths):
-            if remaining < 160:
-                break
-            content = files_by_path.get(path)
-            if content is None:
-                excerpts.append(f"<source path=\"{path}\" status=\"missing\" />")
-            else:
-                allowed = min(self.MAX_REREVIEW_CHARS_PER_FILE, remaining)
-                excerpt = content[:allowed]
-                if len(content) > allowed:
-                    excerpt += "\n/* FirmSight excerpt truncated for AI recheck. */"
-                excerpts.append(f"<source path=\"{path}\">\n{excerpt}\n</source>")
-                remaining -= len(excerpt)
-        return "\n\n".join(excerpts)
+    @staticmethod
+    def _snapshot_changed_files(before_files: list[dict[str, str]], current_files: list[dict[str, str]]) -> list[str]:
+        import hashlib
+
+        def content_hash(item: dict[str, str]) -> str:
+            return item.get("content_hash") or hashlib.sha256(item.get("content", "").encode("utf-8")).hexdigest()
+
+        before = {item["path"]: content_hash(item) for item in before_files}
+        current = {item["path"]: content_hash(item) for item in current_files}
+        return sorted(path for path in before.keys() | current.keys() if before.get(path) != current.get(path))
+
+    def _fix_context(
+        self,
+        finding: FindingRead,
+        before_files: list[dict[str, str]],
+        current_files: list[dict[str, str]] | None = None,
+        *,
+        baseline_symbols: list[dict[str, object]] | None = None,
+        current_symbols: list[dict[str, object]] | None = None,
+        baseline_relations: list[dict[str, object]] | None = None,
+        current_relations: list[dict[str, object]] | None = None,
+        baseline_allocations: list[dict[str, object]] | None = None,
+        current_allocations: list[dict[str, object]] | None = None,
+        project_id: str | None = None,
+    ) -> str:
+        if current_files is None:
+            current_files = before_files
+        intelligence: list[dict[str, str]] = []
+        if project_id and self.intelligence:
+            links = [finding.location.function or "", finding.location.file, finding.category, finding.title]
+            links.extend(item.file for item in finding.evidence)
+            links.extend(finding.execution_path[:12])
+            memory_repository = getattr(self.intelligence, "repository", None)
+            lookup = getattr(memory_repository, "find_memories_by_link_values", None)
+            if callable(lookup):
+                records = lookup(project_id, [value for value in links if value], limit=16)
+                for record in records:
+                    state = str(record.get("state") or "").upper()
+                    if state not in {"VERIFIED", "REINFORCED", "NEEDS_REVALIDATION"}:
+                        continue
+                    label = f"{state} - explicitly revalidate before relying on this" if state == "NEEDS_REVALIDATION" else state
+                    intelligence.append({"id": str(record.get("id") or "")[:100], "state": label, "statement": str(record.get("statement") or "")[:240]})
+                    if len(intelligence) >= 8:
+                        break
+        lifetime: list[dict[str, object]] = []
+        lifetime_relevant = (
+            bool(finding.lifetime_evidence)
+            or finding.category.casefold() in {"memory", "memory_lifetime", "resource_lifetime"}
+            or any(term in finding.title.casefold() for term in ("leak", "lifetime", "ownership", "resource"))
+        )
+        if project_id and lifetime_relevant:
+            try:
+                analysis = self.projects.lifetime_analysis(project_id)
+                lifetime = [
+                    {"symbol": fact.symbol, "variable": fact.variable, "file": fact.file, "allocation_line": fact.allocation_line, "release_lines": list(fact.release_lines), "exit_lines": list(fact.exit_lines), "ownership_state": fact.ownership_state, "evidence_hash": fact.evidence_hash}
+                    for fact in analysis.facts[:16]
+                ]
+            except Exception:  # noqa: BLE001 - missing derived lifetime data makes the check conservative
+                lifetime = []
+        return build_differential_context(
+            finding, before_files, current_files,
+            before_symbols=baseline_symbols, current_symbols=current_symbols,
+            before_relations=baseline_relations, current_relations=current_relations,
+            before_allocations=baseline_allocations, current_allocations=current_allocations,
+            project_intelligence=intelligence, lifetime_facts=lifetime,
+            max_chars=self.MAX_REREVIEW_CONTEXT_CHARS,
+        )
 
     def _finding_topology(self, project_id: str, candidate: FindingCandidate) -> list[dict[str, object]]:
         symbol = candidate.location.function

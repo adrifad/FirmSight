@@ -1,7 +1,23 @@
 export type Project = { id: string; name: string; description: string; source_type: string; language: string | null; framework: string | null; target: string | null; build_system: string | null; file_count: number; symbol_count: number; source_sync_available: boolean }
 export type ProjectFile = { path: string; language: string; size: number; content?: string }
 export type ProjectSourceSync = { project_id: string; file_count: number; symbol_count: number; language: string | null; framework: string | null; target: string | null; build_system: string | null; changed_files: string[] }
-export type FindingRemediation = { status: 'UNVERIFIED' | 'VERIFIED_FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE' | 'MANUALLY_MARKED'; notes: string; verified_at?: string | null; source_refreshed: boolean; changed_files: string[] }
+export type FixVerificationEvidence = { file: string; line: number; symbol?: string | null; evidence_snippet: string; description: string }
+export type FixVerificationReport = {
+  verdict: 'FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE'
+  original_failure_condition: string
+  original_execution_path: string[]
+  current_execution_path: string[]
+  mitigations_found: FixVerificationEvidence[]
+  remaining_failure_evidence: FixVerificationEvidence[]
+  inspected_files: string[]
+  inspected_symbols: string[]
+  missing_context: string[]
+  alternative_mitigation: boolean
+  confidence: number
+  reasoning_summary: string
+  notes?: string | null
+}
+export type FindingRemediation = { status: 'UNVERIFIED' | 'VERIFIED_FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE' | 'MANUALLY_MARKED'; notes: string; verified_at?: string | null; source_refreshed: boolean; changed_files: string[]; baseline_snapshot_hash?: string | null; current_snapshot_hash?: string | null; verification?: FixVerificationReport | null }
 export type Finding = { id: string; project_id: string; title: string; classification: string; severity: string; category: string; confidence: number; location: { file: string; function?: string; line_start: number; line_end: number }; summary: string; evidence: { description: string; file: string; line: number }[]; execution_path: string[]; runtime_scenario: string; impact: string; assumptions: { statement: string; status: string }[]; recommendation: string; verification: { status: string; notes: string }; decision: string; decision_reason?: string; resolution: 'OPEN' | 'SOLVED'; resolved_at?: string | null; remediation: FindingRemediation }
 export type ReviewUsage = { prompt_tokens?: number | null; completion_tokens?: number | null; total_tokens?: number | null; reasoning_tokens?: number | null }
 export type ReviewDiagnostic = { id: number; review_id: string; request_id: string; operation: string; role: string; batch_number?: number | null; total_batches?: number | null; file_count: number; state: string; attempt: number; execution_attempt?: number; repair_attempted: boolean; provider: string; model: string; endpoint: string; created_at: string; elapsed_ms?: number | null; http_status?: number | null; content_type?: string | null; request_chars?: number | null; response_chars?: number | null; usage?: ReviewUsage | null; error_kind?: string | null; error_message?: string | null; content_state?: string | null; finish_reason?: string | null; validation_category?: string | null; validation_fields?: string[]; retry_suppressed?: boolean }

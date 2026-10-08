@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ProjectSourceType(StrEnum):
@@ -328,6 +328,9 @@ class FindingRemediation(BaseModel):
     verified_at: datetime | None = None
     source_refreshed: bool = False
     changed_files: list[str] = Field(default_factory=list)
+    baseline_snapshot_hash: str | None = Field(default=None, max_length=64)
+    current_snapshot_hash: str | None = Field(default=None, max_length=64)
+    verification: "FixVerificationResult | None" = None
 
 
 class FindingRead(BaseModel):
@@ -402,9 +405,53 @@ class ReviewCacheEnvelope(BaseModel):
     verifications: list[VerifierResult] = Field(default_factory=list, max_length=8)
 
 
+class FixVerificationEvidence(BaseModel):
+    file: str = Field(min_length=1, max_length=4000)
+    line: int = Field(ge=1)
+    symbol: str | None = Field(default=None, max_length=240)
+    evidence_snippet: str = Field(default="", max_length=300)
+    description: str = Field(min_length=8, max_length=800)
+
+
 class FixVerificationResult(BaseModel):
-    verdict: str = Field(pattern="^(FIXED|STILL_PRESENT|INCONCLUSIVE)$")
-    notes: str = Field(min_length=8, max_length=3000)
+    verdict: Literal["FIXED", "STILL_PRESENT", "INCONCLUSIVE"]
+    original_failure_condition: str = Field(max_length=2000)
+    original_execution_path: list[str] = Field(max_length=20)
+    current_execution_path: list[str] = Field(max_length=20)
+    mitigations_found: list[FixVerificationEvidence] = Field(max_length=12)
+    remaining_failure_evidence: list[FixVerificationEvidence] = Field(max_length=12)
+    inspected_files: list[str] = Field(max_length=40)
+    inspected_symbols: list[str] = Field(max_length=60)
+    missing_context: list[str] = Field(max_length=12)
+    alternative_mitigation: bool
+    confidence: float = Field(ge=0, le=1)
+    reasoning_summary: str = Field(max_length=1600)
+    # Older stored/provider payloads used `notes`. It remains accepted while
+    # every new prompt and persisted report uses the evidence-bearing fields.
+    notes: str | None = Field(default=None, max_length=1600)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_notes_to_summary(cls, value):
+        if isinstance(value, dict):
+            value = {
+                "original_failure_condition": "",
+                "original_execution_path": [],
+                "current_execution_path": [],
+                "mitigations_found": [],
+                "remaining_failure_evidence": [],
+                "inspected_files": [],
+                "inspected_symbols": [],
+                "missing_context": [],
+                "alternative_mitigation": False,
+                "confidence": 0.0,
+                "reasoning_summary": value.get("notes", ""),
+                **value,
+            }
+        return value
+
+
+FindingRemediation.model_rebuild()
 
 
 class YamlGenerationResult(BaseModel):

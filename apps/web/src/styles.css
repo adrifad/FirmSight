@@ -843,6 +843,24 @@ dd { margin: 4px 0 0; color: var(--text-primary); font-size: 13px; font-weight: 
 .fix-verification { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, .44fr); gap: 18px; align-items: start; padding: 12px 0 2px; }
 .fix-verification > div:first-child { display: grid; justify-items: start; gap: 8px; }
 .fix-verification > div:first-child p { color: var(--text-secondary); }
+.fix-report { display: grid; gap: 13px; min-width: 0; padding: 10px 0 2px; }
+.fix-report-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.fix-report-heading > strong { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fix-report-summary, .fix-report-group p { max-width: 76ch; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.fix-report-group { display: grid; gap: 7px; min-width: 0; }
+.fix-report-group > strong { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.fix-report-group .execution { padding-left: 2px; }
+.fix-report-evidence, .fix-report-group > ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.fix-report-evidence li { display: flex; align-items: flex-start; gap: 9px; min-width: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.fix-report-evidence li > code, .fix-report-group > ul code { flex: 0 0 auto; color: var(--brand-primary-deep); font-family: var(--font-mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.fix-report-evidence li > span { min-width: 0; overflow-wrap: anywhere; }
+.fix-report-evidence small { display: block; margin-top: 4px; color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fix-report-alternative { justify-self: start; margin: 0; padding: 4px 8px; border: 1px solid var(--success-border); border-radius: 8px; color: var(--success-text); font-size: 11px; }
+.fix-report-inspected { display: grid; gap: 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.fix-report-inspected summary { color: var(--text-tertiary); cursor: pointer; font-size: 11px; }
+.fix-report-inspected[open] { gap: 12px; }
+.fix-report-inspected > p { margin: 0; color: var(--text-tertiary); font-size: 10px; overflow-wrap: anywhere; }
+.fix-report-inspected > p code { font-family: var(--font-mono); }
 .changed-files { display: flex; flex-wrap: wrap; justify-content: flex-end; align-content: start; gap: 6px; padding: 2px 0 0; text-align: right; }
 .changed-files > span { width: 100%; color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
 .changed-files code {

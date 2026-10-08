@@ -32,7 +32,30 @@ class FixtureProvider:
 
     def chat(self, system_prompt: str, user_prompt: str) -> str:
         if "Fix Verifier" in system_prompt:
-            return json.dumps({"verdict": "FIXED", "notes": "The refreshed source releases the mutex on the former error path."})
+            fixed_line = "        xSemaphoreGive(ota_mutex);"
+            current_context = user_prompt.split("CURRENT SOURCE:", 1)[-1].split("SOURCE DIFF", 1)[0]
+            fixed = fixed_line in current_context and current_context.find(fixed_line) < current_context.find("        return err;")
+            evidence_line = 7
+            evidence_snippet = fixed_line if fixed else "        return err;"
+            evidence = {
+                "file": self.source_path, "line": evidence_line, "symbol": "ota_install",
+                "evidence_snippet": evidence_snippet,
+                "description": "Current error handling releases the acquired mutex." if fixed else "Current error return still exits before releasing the mutex.",
+            }
+            return json.dumps({
+                "verdict": "FIXED" if fixed else "STILL_PRESENT",
+                "original_failure_condition": "The OTA setup error path can retain the mutex.",
+                "original_execution_path": ["ota_install", "xSemaphoreTake", "esp_ota_begin", "return"],
+                "current_execution_path": ["ota_install", "xSemaphoreTake", "esp_ota_begin", "xSemaphoreGive", "return"] if fixed else ["ota_install", "xSemaphoreTake", "esp_ota_begin", "return err"],
+                "mitigations_found": [evidence] if fixed else [],
+                "remaining_failure_evidence": [] if fixed else [evidence],
+                "inspected_files": [self.source_path],
+                "inspected_symbols": ["ota_install"],
+                "missing_context": [],
+                "alternative_mitigation": False,
+                "confidence": 0.91,
+                "reasoning_summary": "The current error path releases the acquired mutex before returning." if fixed else "The current error path still returns before releasing the acquired mutex.",
+            })
         if "Investigator" in system_prompt:
             return json.dumps({"findings": [{
                 "title": "OTA mutex is not released when setup fails",
@@ -67,7 +90,7 @@ class ReReviewFixtureProvider(FixtureProvider):
     def chat(self, system_prompt: str, user_prompt: str) -> str:
         if "Fix Verifier" in system_prompt:
             self.calls.append("fix")
-            return json.dumps({"verdict": "FIXED", "notes": "The current error path releases the mutex before returning."})
+            return super().chat(system_prompt, user_prompt)
         if "Investigator" in system_prompt:
             self.calls.append("investigator")
             self.investigator_calls += 1
@@ -908,8 +931,49 @@ esp_err_t ota_install(void) {
     assert payload["remediation"]["status"] == "VERIFIED_FIXED"
     assert payload["remediation"]["source_refreshed"] is True
     assert payload["remediation"]["changed_files"] == ["src/main.c"]
+    assert payload["remediation"]["verification"]["verdict"] == "FIXED"
+    assert payload["remediation"]["verification"]["mitigations_found"][0]["file"] == "src/main.c"
+    assert len(payload["remediation"]["baseline_snapshot_hash"]) == 64
+    assert len(payload["remediation"]["current_snapshot_hash"]) == 64
     refreshed = api.get(f"/api/projects/{project['id']}/files/content", params={"path": "src/main.c"})
     assert "xSemaphoreGive(ota_mutex);\n        return err" in refreshed.json()["content"]
+
+
+def test_verify_fix_checks_current_source_even_when_indexed_changed_file_list_is_empty(tmp_path):
+    import_root = tmp_path / "firmware-workspace"
+    project_directory = import_root / "ota-device"
+    source_directory = project_directory / "src"
+    source_directory.mkdir(parents=True)
+    source_path = source_directory / "main.c"
+    source_path.write_text(
+        """#include <freertos/semphr.h>
+static SemaphoreHandle_t ota_mutex;
+esp_err_t ota_install(void) {
+    xSemaphoreTake(ota_mutex, portMAX_DELAY);
+    esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    xSemaphoreGive(ota_mutex);
+    return ESP_OK;
+}
+""",
+        encoding="utf-8",
+    )
+    provider = FixtureProvider(source_path="src/main.c")
+    api = TestClient(create_app(str(tmp_path / "firmsight-no-diff.db"), str(import_root), provider_resolver=lambda _role: provider))
+    project = api.post("/api/projects/import-directory", json={"directory": str(project_directory)}).json()
+    review = api.post(f"/api/projects/{project['id']}/reviews", json={"focus": ["ota"]}).json()
+    finding = api.get(f"/api/projects/{project['id']}/findings").json()[0]
+    api.patch(f"/api/projects/{project['id']}/findings/{finding['id']}/decision", json={"decision": "ACCEPTED"})
+
+    verified = api.post(f"/api/projects/{project['id']}/findings/{finding['id']}/verify-fix")
+
+    assert verified.status_code == 200, verified.text
+    payload = verified.json()
+    assert payload["remediation"]["changed_files"] == []
+    assert payload["remediation"]["status"] == "STILL_PRESENT"
+    assert payload["remediation"]["verification"]["remaining_failure_evidence"]
 
 
 def test_provider_default_review_path_snapshots_budget_and_keeps_failed_unit_unavailable(monkeypatch, tmp_path):
@@ -1036,7 +1100,23 @@ esp_err_t ota_install(void) {
         if "Fix Verifier" in system_prompt:
             fix_calls += 1
             verdict = "STILL_PRESENT" if fix_calls == 1 else "FIXED"
-            body = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"verdict": verdict, "notes": "The explicit fixed verifier budget completed this check."})}}]}
+            current_line = "        return err;" if verdict == "STILL_PRESENT" else "        xSemaphoreGive(ota_mutex);"
+            evidence = {"file": "src/main.c", "line": 7, "symbol": "ota_install", "evidence_snippet": current_line, "description": "Current error path evidence."}
+            response = {
+                "verdict": verdict,
+                "original_failure_condition": "The OTA setup error path may retain the mutex.",
+                "original_execution_path": ["ota_install", "xSemaphoreTake", "esp_ota_begin", "return"],
+                "current_execution_path": ["ota_install", "xSemaphoreTake", "esp_ota_begin", "return err"] if verdict == "STILL_PRESENT" else ["ota_install", "xSemaphoreTake", "esp_ota_begin", "xSemaphoreGive", "return"],
+                "mitigations_found": [evidence] if verdict == "FIXED" else [],
+                "remaining_failure_evidence": [evidence] if verdict == "STILL_PRESENT" else [],
+                "inspected_files": ["src/main.c"],
+                "inspected_symbols": ["ota_install"],
+                "missing_context": [],
+                "alternative_mitigation": False,
+                "confidence": 0.9,
+                "reasoning_summary": "The structured verifier completed using its fixed output budget.",
+            }
+            body = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(response)}}]}
         elif "FirmSight Investigator" in system_prompt:
             body = {"choices": [{"finish_reason": "stop", "message": {"content": candidate_json}}]}
         else:

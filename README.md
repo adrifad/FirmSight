@@ -15,6 +15,26 @@ FirmSight is an evidence-oriented firmware review workspace. It treats firmware 
 
 AI Review and YAML generation use the configured server-side provider: Investigator proposes structured candidates, then Verifier/Skeptic attempts to disprove them. They never fall back to local pattern matching or a generated template. If the API key or required model is unavailable, FirmSight shows an explicit configuration error. OpenRouter and 9router use the same isolated OpenAI-compatible transport; keys remain server-only and are never returned by the API or UI.
 
+## Fix Verification
+
+Fix Verification is an evidence-based, differential, source-authoritative,
+topology-aware check for an accepted CONFIRMED_BUG. It compares the finding
+and indexed baseline source with freshly indexed current source, a bounded
+source diff, current callers/callees and resource relations, and only relevant
+Project Intelligence. Source snapshots and the structured verification report
+are persisted with the finding so the verdict remains inspectable. A missing or
+incomplete changed-file list does not by itself determine the verdict.
+
+The verifier asks whether the original failure condition is still reachable in
+current source. It may accept a different mitigation from the original
+recommendation, such as single-writer ownership and copied queue messages in
+place of a mutex. FIXED means the original failure condition is no longer
+supported by current source evidence. It does not mean the developer followed
+FirmSight's recommendation literally. STILL_PRESENT requires concrete
+current file/line evidence and a reachable current failure path. When the
+relevant path, topology, or source mapping cannot be established, the result is
+INCONCLUSIVE.
+
 ## Run the full stack
 
 Install Python dependencies once:
