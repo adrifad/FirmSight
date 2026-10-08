@@ -1,0 +1,21 @@
+/* Dashboard metric grid rhythm (TASK-2026-0004).
+
+   The four workspace metrics sit four-across on desktop, fold to two balanced
+   columns on tablet widths, and stack single-file on phones. Only the column
+   tracks are declared here — spacing, surfaces, and card styling keep coming
+   from the .metric-grid / .metric-card rules and tokens in styles.css, which
+   this file is imported after. minmax(0, 1fr) stops long labels or error text
+   from stretching a track. */
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 1024px) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .metric-grid { grid-template-columns: minmax(0, 1fr); }
+}

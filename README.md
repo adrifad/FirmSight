@@ -24,6 +24,10 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+This installs the backend runtime dependencies, including `PyYAML>=6.0.3,<7`
+for safe Knowledge Base frontmatter parsing and rendering with
+`yaml.safe_load`/`yaml.safe_dump`.
+
 Before starting the API, add the server-side provider configuration to `.env`:
 
 ```bash
@@ -63,6 +67,57 @@ cd ../..
 ```
 
 SQLite data defaults to `./data/firmsight.db`; override this with `FIRMSIGHT_DATABASE`.
+
+## Reset FirmSight local data
+
+Resetting FirmSight removes FirmSight's own persisted records only. It never
+deletes your firmware directories or any other unrelated file.
+
+1. Stop the backend (FastAPI) and the frontend dev server (Vite) before touching
+   persistence. A running process may hold the database open or rewrite its
+   settings during a reset.
+2. Determine the database path. Check whether `FIRMSIGHT_DATABASE` is set first;
+   otherwise the default is `./data/firmsight.db`.
+3. Prefer moving the database to a timestamped backup over deleting it in place,
+   so an accidental reset stays recoverable.
+4. Restart the backend. A missing database is recreated as an empty database on
+   startup, so no explicit init step is required.
+
+For example (Fish):
+
+```fish
+set databases_backup ~/firmsight-backups
+mkdir -p $databases_backup
+set stamp (date +%Y%m%d-%H%M%S)
+
+# Stop FastAPI and Vite first.
+
+# Use FIRMSIGHT_DATABASE if it is set; the default lives under ./data.
+if set -q FIRMSIGHT_DATABASE
+    set db_path $FIRMSIGHT_DATABASE
+else
+    set db_path ./data/firmsight.db
+end
+
+# Preserve the old database, then let the backend start fresh.
+mv $db_path "$databases_backup/firmsight-$stamp.db"
+
+# Restart FastAPI now. The backend recreates ./data/firmsight.db (or the
+# FIRMSIGHT_DATABASE path) as an empty database on startup.
+```
+
+Notes:
+
+- The reset removes FirmSight records and settings only: projects, source
+  indexes, reviews, findings, chat history, YAML generations, Project
+  Intelligence, and learning jobs. Your firmware directories and `.env` provider
+  credentials are not part of the SQLite database and are never touched.
+- The optional Obsidian vault is a Markdown projection that lives outside the
+  SQLite database. Resetting SQLite does not delete it. Only manually remove the
+  vault files when the configured vault path is dedicated exclusively to
+  FirmSight and you also want to clear that projection.
+- Always confirm `FIRMSIGHT_DATABASE` before deleting, and never put secrets in
+  command output or scripts.
 
 ## Local directory import
 
@@ -142,6 +197,55 @@ curl -sS -o /tmp/firmsight-ai-response.json -w 'HTTP %{http_code}\n' "$FIRMSIGHT
 - Paths are normalized and directory traversal is rejected. Individual imports are size-limited.
 - Source comments, strings, and documentation are data, not AI instructions.
 - Engineering Memory is used for analysis only after an explicit engineer approval action.
+
+## Project Intelligence, Obsidian, and lifetime analysis
+
+FirmSight keeps SQLite as the authoritative store for Project Intelligence. An
+Obsidian vault is an optional, portable Markdown projection and retrieval corpus;
+editing a Markdown file cannot promote a record to `VERIFIED` or bypass source
+revalidation. Configure the server-side vault root with either
+`FIRMSIGHT_OBSIDIAN_VAULT_ROOT` or the Knowledge Base section in Settings. An
+optional `FIRMSIGHT_OBSIDIAN_ALLOWED_ROOTS` path-separated list restricts where
+the root may be created. Sync and search use the saved server setting and never
+accept an arbitrary filesystem path from a request.
+
+The generated layout is:
+
+```text
+<vault>/Projects/<project-slug>/
+  00-Project/ 01-Architecture/ 02-Components/ 03-Reviews/
+  04-Knowledge/{Facts,Design-Intent,Architecture,False-Positives,
+                Bug-Patterns,Resolution-Patterns,Recurring-Patterns}/
+  05-Findings/ 06-Resolutions/ 07-Releases/ 08-Index/ 09-Journal/
+```
+
+Knowledge documents contain validated YAML frontmatter with a stable `MEM-*`
+ID, project scope, lifecycle status, confidence, provenance, relationships,
+and schema version. Writes are atomic. Only Markdown under the known project
+directory is scanned; malformed, oversized, symlinked, wrong-project, or
+unknown-ID files are reported as quarantined and are never executed or used as
+instructions. Current indexed source outranks topology history, intelligence,
+Markdown, and lexical/semantic retrieval. `VERIFIED` and `REINFORCED` records
+may guide retrieval, `PROVISIONAL` records are tentative, `NEEDS_REVALIDATION`
+records are down-ranked with a warning, and `CONFLICTED`, `SUPERSEDED`, and
+`DISABLED` records are not treated as current authority.
+
+The static memory-lifetime index recognizes only the supported allocation APIs
+(`malloc`, `calloc`, `realloc`, `free`, `new`, `delete`, and the configured
+ESP heap variants). It separates releases, unbalanced exits, returned or stored
+ownership, unknown callees, and uncertain reallocations. A keyword match does
+not prove a leak: a candidate requires a concrete allocation and a plausible
+source-backed error/return path with no observed ownership escape. This is
+static candidate evidence only; it does not prove runtime heap behavior and does
+not replace sanitizers, heap tracing, stress tests, or hardware validation.
+
+Normal vault sync scans and validates existing project Markdown before any
+write. A changed file is imported as `ENGINEER_EDITED` notes and its generated
+statement/evidence/relationship projection is rebuilt from SQLite. Normal sync
+does not overwrite an unimported edit. An explicit service-level
+`sync_project(..., regenerate=True)` request may regenerate the projection while
+preserving the editable Engineer Notes section; malformed or symlinked files
+remain quarantined and are never replaced.
 
 ## Verify
 

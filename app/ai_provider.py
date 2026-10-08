@@ -99,6 +99,10 @@ class ProviderEvent:
     repair_attempted: bool = False
     content_state: ContentState | None = None
     finish_reason: str | None = None
+    structured_mode: str | None = None
+    finalization_policy: str | None = None
+    finalization_recovery: bool = False
+    effective_max_tokens: int | None = None
     validation_category: str | None = None
     validation_fields: tuple[str, ...] = ()
     retry_suppressed: bool = False
@@ -158,6 +162,7 @@ class OpenRouterProvider:
     max_tokens: int | None = None
     structured_output_mode: str = "PROMPT_ONLY"
     reasoning_effort: str = "UNSPECIFIED"
+    structured_finalization_policy: str = "AUTO"
 
     def available(self) -> bool:
         return bool(self.api_key)
@@ -177,6 +182,7 @@ class OpenRouterProvider:
         structured_schema: dict[str, object] | None = None,
         structured_output_mode: str | None = None,
         reasoning_effort: str | None = None,
+        max_tokens_override: int | None = None,
     ) -> ProviderResponse:
         if not self.api_key:
             raise RuntimeError("No server AI API key is configured")
@@ -200,6 +206,7 @@ class OpenRouterProvider:
             validation_category: str | None = None,
             validation_fields: tuple[str, ...] = (),
             retry_suppressed: bool = False,
+            effective_max_tokens: int | None = None,
         ) -> None:
             event = ProviderEvent(
                 state=state,
@@ -220,6 +227,10 @@ class OpenRouterProvider:
                 attempt=attempt,
                 content_state=content_state,
                 finish_reason=finish_reason,
+                structured_mode=output_mode if structured_call else None,
+                finalization_policy=self.structured_finalization_policy,
+                finalization_recovery=operation.endswith(":finalization-retry"),
+                effective_max_tokens=effective_max_tokens if effective_max_tokens is not None else (configured_max_tokens if isinstance(configured_max_tokens, int) else None),
                 validation_category=validation_category,
                 validation_fields=validation_fields,
                 retry_suppressed=retry_suppressed,
@@ -234,8 +245,9 @@ class OpenRouterProvider:
             ],
             "temperature": 0.1,
         }
-        if self.max_tokens:
-            payload_data["max_tokens"] = self.max_tokens
+        configured_max_tokens = max_tokens_override if max_tokens_override is not None else self.max_tokens
+        if configured_max_tokens:
+            payload_data["max_tokens"] = configured_max_tokens
         output_mode = structured_output_mode or self.structured_output_mode
         if structured_schema is not None and output_mode == "JSON_OBJECT":
             payload_data["response_format"] = {"type": "json_object"}
@@ -245,8 +257,23 @@ class OpenRouterProvider:
                 "json_schema": {"name": "firmsight_structured_result", "strict": True, "schema": structured_schema},
             }
         effort = reasoning_effort or self.reasoning_effort
+        model_id = self.model.casefold().rsplit("/", 1)[-1]
+        is_deepseek = model_id.startswith("deepseek")
+        # DeepSeek enables thinking by default. For structured FirmSight calls,
+        # an unspecified effort must not silently consume the whole completion
+        # budget before the required JSON object is emitted. Users can still
+        # explicitly select LOW/MEDIUM/HIGH when they want thinking enabled.
+        if structured_schema is not None and is_deepseek and (not effort or effort == "UNSPECIFIED"):
+            effort = "NONE"
         if effort and effort != "UNSPECIFIED":
-            payload_data["reasoning_effort"] = effort.casefold()
+            normalized_effort = effort.casefold()
+            payload_data["reasoning_effort"] = normalized_effort
+            # DeepSeek V4/V4.1 exposes thinking as an additional OpenAI-style
+            # body field.  KiosAPI forwards this field, while silently ignoring
+            # an effort hint alone can leave the model in its default thinking
+            # mode and consume the entire completion budget before JSON.
+            if is_deepseek:
+                payload_data["thinking"] = {"type": "disabled" if normalized_effort == "none" else "enabled"}
         structured_call = structured_schema is not None
         structured_request = structured_call and output_mode != "PROMPT_ONLY"
         payload = json.dumps(payload_data).encode("utf-8")
@@ -359,6 +386,36 @@ class OpenAICompatibleProvider(OpenRouterProvider):
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 MAX_EMPTY_CONTENT_ATTEMPTS = 3
+STRUCTURED_REPAIR_MIN_TOKENS = 2_000
+# Bounded final-output budget for the one-shot structured finalization
+# recovery. It is intentionally different from the normal role budget so the
+# recovery request contract differs deterministically from the failed one.
+FINALIZATION_RECOVERY_MAX_TOKENS = 1_600
+# Conditions that make a structured request eligible for exactly one
+# finalization recovery: the provider hit its output limit before emitting
+# any final assistant content (finish_reason "length" with reasoning-only,
+# empty, or missing message content).
+FINALIZATION_RECOVERY_CONTENT_STATES = frozenset({"REASONING_ONLY", "EMPTY", "MISSING_MESSAGE"})
+
+
+def _is_finalization_recovery_trigger(summary: CompletionSummary) -> bool:
+    """Recognize the bounded recovery trigger without reading raw output."""
+    return summary.finish_reason == "length" and summary.content_state in FINALIZATION_RECOVERY_CONTENT_STATES
+
+
+def _finalization_policy_allows_recovery(provider: AIProvider) -> bool:
+    policy = str(getattr(provider, "structured_finalization_policy", "AUTO") or "AUTO").upper()
+    if policy == "NEVER":
+        return False
+    if not callable(getattr(provider, "chat_with_metadata", None)):
+        return False
+    if policy == "ALWAYS":
+        return True
+    # AUTO: only reasoning-capable OpenAI-compatible providers whose current
+    # reasoning policy can consume the shared completion budget.
+    if not _is_deepseek_provider(provider):
+        return False
+    return str(getattr(provider, "reasoning_effort", "UNSPECIFIED") or "UNSPECIFIED").upper() in {"", "UNSPECIFIED", "LOW", "MEDIUM", "HIGH"}
 
 
 def _completion_summary(response: object) -> CompletionSummary:
@@ -385,7 +442,7 @@ def _completion_summary(response: object) -> CompletionSummary:
 
 def _is_output_limit_before_final(summary: CompletionSummary) -> bool:
     """Recognize truncation before final assistant content without reading raw output."""
-    return summary.finish_reason == "length" and summary.content_state in {"REASONING_ONLY", "EMPTY", "MISSING_MESSAGE"}
+    return _is_finalization_recovery_trigger(summary)
 
 
 def _validation_summary(error: ValidationError | ValueError | json.JSONDecodeError) -> ValidationSummary:
@@ -430,6 +487,29 @@ def _validation_error_message(summary: ValidationSummary, prefix: str) -> str:
     return f"{prefix}: {summary.category.lower().replace('_', ' ')}" + (f" ({fields})" if fields else "")
 
 
+def _structured_repair_budget(provider: AIProvider) -> int:
+    """Give a repair enough room to emit the full schema, without changing normal budgets."""
+    configured = getattr(provider, "max_tokens", None)
+    if isinstance(configured, int) and not isinstance(configured, bool):
+        return max(configured, STRUCTURED_REPAIR_MIN_TOKENS)
+    return STRUCTURED_REPAIR_MIN_TOKENS
+
+
+def _finalization_recovery_budget(provider: AIProvider) -> int:
+    """Safe bounded output budget for the finalization recovery request.
+
+    The recovery asks for one concise JSON object with thinking disabled, so a
+    smaller fixed budget than the exhausted attempt is sufficient and keeps the
+    request contract visibly bounded.
+    """
+    return FINALIZATION_RECOVERY_MAX_TOKENS
+
+
+def _is_deepseek_provider(provider: AIProvider) -> bool:
+    model = str(getattr(provider, "model", "")).casefold().rsplit("/", 1)[-1]
+    return model.startswith("deepseek") and callable(getattr(provider, "chat_with_metadata", None))
+
+
 def structured_response(
     provider: AIProvider,
     model: type[ModelT],
@@ -465,6 +545,10 @@ def structured_response(
                     created_at=datetime.now(UTC).isoformat(),
                     request_chars=len(attempt_system) + len(user_prompt),
                     attempt=attempt,
+                    structured_mode=str(getattr(provider, "structured_output_mode", None) or None),
+                    finalization_policy=str(getattr(provider, "structured_finalization_policy", None) or None),
+                    finalization_recovery=False,
+                    effective_max_tokens=getattr(provider, "max_tokens", None) if isinstance(getattr(provider, "max_tokens", None), int) and not isinstance(getattr(provider, "max_tokens", None), bool) else None,
                 ),
                 on_event,
             )
@@ -549,6 +633,45 @@ def structured_response(
                 )
                 raise error
             if "provider format incompatible" in message or "output limit reached before final" in message:
+                # An output-limit-before-final failure is eligible for exactly
+                # one materially different finalization recovery: thinking
+                # forced off, one concise JSON object required, and the safe
+                # bounded final-output budget. The recovery is attempted only
+                # when the provider exposes the structured metadata boundary
+                # and the persisted finalization policy allows it. The initial
+                # request's terminal state is marked as
+                # FINALIZATION_RECOVERY_SCHEDULED so diagnostics never present
+                # the flow as "retry suppressed" when a changed recovery is
+                # actually being sent.
+                recovery_allowed = (
+                    "output limit reached before final" in message
+                    and _finalization_policy_allows_recovery(provider)
+                )
+                if recovery_allowed and provider_emits_lifecycle:
+                    _publish_event(
+                        ProviderEvent(
+                            state="FINALIZATION_RECOVERY_SCHEDULED",
+                            request_id=active_request_id,
+                            operation=operation,
+                            provider=getattr(provider, "name", "unknown"),
+                            model=getattr(provider, "model", "unknown"),
+                            endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+                            created_at=datetime.now(UTC).isoformat(),
+                            attempt=attempt,
+                            structured_mode=str(getattr(provider, "structured_output_mode", None) or None),
+                            finalization_policy=str(getattr(provider, "structured_finalization_policy", None) or None),
+                            finalization_recovery=False,
+                            effective_max_tokens=FINALIZATION_RECOVERY_MAX_TOKENS,
+                            retry_suppressed=False,
+                        ),
+                        on_event,
+                    )
+                    recovered = _finalization_recovery(
+                        provider, model, system_prompt, user_prompt,
+                        operation=operation, on_event=on_event,
+                    )
+                    if recovered is not None:
+                        return recovered
                 raise error
 
     if raw is None:
@@ -565,12 +688,76 @@ def structured_response(
                 endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
                 created_at=datetime.now(UTC).isoformat(),
                 attempt=attempt,
+                effective_max_tokens=getattr(provider, "max_tokens", None) if isinstance(getattr(provider, "max_tokens", None), int) and not isinstance(getattr(provider, "max_tokens", None), bool) else None,
             ),
             on_event,
         )
         return result
     except (ValidationError, ValueError, json.JSONDecodeError) as first_error:
         first_summary = _validation_summary(first_error)
+        # DeepSeek/KiosAPI can occasionally emit a nearly complete object on
+        # the first structured call. Give it one strict, concise retry before
+        # asking the repair prompt to reconstruct the original response. This
+        # is bounded to one extra request and only applies to concrete
+        # OpenAI-compatible DeepSeek providers.
+        if _is_deepseek_provider(provider):
+            retry_request_id = f"AI-{uuid4().hex[:12].upper()}"
+            retry_system = (
+                f"{system_prompt}\n\nSTRICT STRUCTURED RETRY: return exactly one valid JSON object matching the schema. "
+                "Do not emit reasoning, Markdown, comments, or a second object. Keep all strings concise."
+            )
+            retry_user = f"{user_prompt}\n\nThe previous object failed validation ({_validation_error_message(first_summary, 'invalid fields')}). Return a corrected JSON object only."
+            _publish_event(
+                ProviderEvent(
+                    state="REQUEST_PREPARED",
+                    request_id=retry_request_id,
+                    operation=f"{operation}:schema-retry",
+                    provider=getattr(provider, "name", "unknown"),
+                    model=getattr(provider, "model", "unknown"),
+                    endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+                    created_at=datetime.now(UTC).isoformat(),
+                    request_chars=len(retry_system) + len(retry_user),
+                    attempt=2,
+                    repair_attempted=True,
+                ),
+                on_event,
+            )
+            try:
+                retry_response = provider.chat_with_metadata(  # type: ignore[attr-defined]
+                    retry_system,
+                    retry_user,
+                    operation=f"{operation}:schema-retry",
+                    request_id=retry_request_id,
+                    attempt=2,
+                    on_event=on_event,
+                    structured_schema=model.model_json_schema(),
+                    structured_output_mode=getattr(provider, "structured_output_mode", "PROMPT_ONLY"),
+                    reasoning_effort=getattr(provider, "reasoning_effort", "UNSPECIFIED"),
+                    max_tokens_override=_structured_repair_budget(provider),
+                )
+                raw = retry_response.content
+                result = model.model_validate(_extract_json(raw))
+                _publish_event(
+                    ProviderEvent(
+                        state="STRUCTURED_VALIDATED",
+                        request_id=retry_request_id,
+                        operation=f"{operation}:schema-retry",
+                        provider=getattr(provider, "name", "unknown"),
+                        model=getattr(provider, "model", "unknown"),
+                        endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+                        created_at=datetime.now(UTC).isoformat(),
+                        attempt=2,
+                        repair_attempted=True,
+                    ),
+                    on_event,
+                )
+                return result
+            except (RuntimeError, ValidationError, ValueError, json.JSONDecodeError) as retry_error:
+                # Preserve the strict retry's response for the following
+                # repair attempt when one was received; otherwise retain the
+                # original response and its validation context.
+                if isinstance(retry_error, RuntimeError) and raw is None:
+                    raw = None
         _publish_event(
             ProviderEvent(
                 state="REPAIR_STARTED",
@@ -588,8 +775,12 @@ def structured_response(
             ),
             on_event,
         )
-        repair_system = "You repair structured FirmSight responses. Return only one valid JSON object that matches the requested schema. Do not add Markdown, explanation, or code fences."
-        repair_user = f"Required JSON Schema:\n{json.dumps(model.model_json_schema(), ensure_ascii=False)}\n\nInvalid response:\n{raw[:24000]}"
+        repair_system = "You repair structured FirmSight responses. Return only one valid JSON object that matches the requested schema. Do not add Markdown, explanation, reasoning, or code fences. Keep strings concise and preserve only evidence present in the invalid response."
+        repair_user = (
+            f"Validation issue: {_validation_error_message(first_summary, 'the previous response failed')}\n\n"
+            f"Required JSON Schema:\n{json.dumps(model.model_json_schema(), ensure_ascii=False)}\n\n"
+            f"Invalid response:\n{raw[:24000]}"
+        )
         repair_request_id = f"AI-{uuid4().hex[:12].upper()}"
         _publish_event(
             ProviderEvent(
@@ -606,7 +797,17 @@ def structured_response(
             on_event,
         )
         if (chat_with_metadata := getattr(provider, "chat_with_metadata", None)) and callable(chat_with_metadata):
-            repaired = chat_with_metadata(repair_system, repair_user, operation=f"{operation}:repair", request_id=repair_request_id, on_event=on_event, structured_schema=model.model_json_schema(), structured_output_mode=getattr(provider, "structured_output_mode", "PROMPT_ONLY"), reasoning_effort=getattr(provider, "reasoning_effort", "UNSPECIFIED")).content
+            repaired = chat_with_metadata(
+                repair_system,
+                repair_user,
+                operation=f"{operation}:repair",
+                request_id=repair_request_id,
+                on_event=on_event,
+                structured_schema=model.model_json_schema(),
+                structured_output_mode=getattr(provider, "structured_output_mode", "PROMPT_ONLY"),
+                reasoning_effort=getattr(provider, "reasoning_effort", "UNSPECIFIED"),
+                max_tokens_override=_structured_repair_budget(provider),
+            ).content
         else:
             repaired = provider.chat(repair_system, repair_user)
         try:
@@ -647,6 +848,122 @@ def structured_response(
                 on_event,
             )
             raise RuntimeError("AI response could not be validated after one repair attempt") from error
+
+
+def _finalization_recovery(
+    provider: AIProvider,
+    model: type[ModelT],
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    operation: str,
+    on_event: ProviderEventSink | None,
+) -> ModelT | None:
+    """Attempt one bounded, materially different structured finalization request.
+
+    Triggered only after the provider exhausted its completion budget before any
+    final assistant content (finish_reason "length" with reasoning-only, empty,
+    or missing content). The recovery contract differs deterministically:
+
+    - a new request id and a ``:finalization-retry`` operation suffix,
+    - structured reasoning/thinking forced off,
+    - an explicit concise-JSON-only instruction,
+    - the safe bounded final-output budget instead of the exhausted role budget.
+
+    Hidden reasoning from the failed response is never reused. Returns a
+    validated result, or ``None`` when recovery is exhausted (after emitting a
+    terminal ``OUTPUT_FINALIZATION_EXHAUSTED`` event with both attempts' safe
+    metadata and no response content).
+    """
+    recovery_operation = f"{operation}:finalization-retry"
+    recovery_request_id = f"AI-{uuid4().hex[:12].upper()}"
+    recovery_system = (
+        f"{system_prompt}\n\nFINALIZATION RETRY: The previous structured request exhausted its completion "
+        "budget before producing the required JSON object. Respond with exactly one valid JSON object that "
+        "matches the schema. Do not emit reasoning, Markdown, comments, or code fences. Keep all strings "
+        "concise and return the complete object in message.content."
+    )
+    _publish_event(
+        ProviderEvent(
+            state="REQUEST_PREPARED",
+            request_id=recovery_request_id,
+            operation=recovery_operation,
+            provider=getattr(provider, "name", "unknown"),
+            model=getattr(provider, "model", "unknown"),
+            endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+            created_at=datetime.now(UTC).isoformat(),
+            request_chars=len(recovery_system) + len(user_prompt),
+            attempt=2,
+            repair_attempted=True,
+            structured_mode=str(getattr(provider, "structured_output_mode", None) or None),
+            finalization_policy=str(getattr(provider, "structured_finalization_policy", None) or None),
+            finalization_recovery=True,
+            effective_max_tokens=FINALIZATION_RECOVERY_MAX_TOKENS,
+        ),
+        on_event,
+    )
+    try:
+        recovery_response = provider.chat_with_metadata(  # type: ignore[attr-defined]
+            recovery_system,
+            user_prompt,
+            operation=recovery_operation,
+            request_id=recovery_request_id,
+            attempt=2,
+            on_event=on_event,
+            structured_schema=model.model_json_schema(),
+            structured_output_mode=getattr(provider, "structured_output_mode", "PROMPT_ONLY"),
+            reasoning_effort="NONE",
+            max_tokens_override=_finalization_recovery_budget(provider),
+        )
+        result = model.model_validate(_extract_json(recovery_response.content))
+    except (RuntimeError, ValidationError, ValueError, json.JSONDecodeError) as recovery_error:
+        summary = _validation_summary(recovery_error) if isinstance(recovery_error, (ValidationError, ValueError, json.JSONDecodeError)) else None
+        _publish_event(
+            ProviderEvent(
+                state="FAILED",
+                request_id=recovery_request_id,
+                operation=recovery_operation,
+                provider=getattr(provider, "name", "unknown"),
+                model=getattr(provider, "model", "unknown"),
+                endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+                created_at=datetime.now(UTC).isoformat(),
+                error_kind="OUTPUT_FINALIZATION_EXHAUSTED",
+                error_message=(
+                    "Initial structured request exhausted its output budget on reasoning and the one bounded "
+                    "finalization retry did not produce a validated JSON response"
+                    if summary is None
+                    else "Initial structured request exhausted its output budget on reasoning and the one bounded "
+                    "finalization retry failed schema validation"
+                ),
+                attempt=2,
+                repair_attempted=True,
+                finalization_recovery=True,
+                effective_max_tokens=FINALIZATION_RECOVERY_MAX_TOKENS,
+                validation_category=summary.category if summary else None,
+                validation_fields=summary.fields if summary else (),
+            ),
+            on_event,
+        )
+        return None
+    _publish_event(
+        ProviderEvent(
+            state="STRUCTURED_VALIDATED",
+            request_id=recovery_request_id,
+            operation=recovery_operation,
+            provider=getattr(provider, "name", "unknown"),
+            model=getattr(provider, "model", "unknown"),
+            endpoint=_safe_endpoint(getattr(provider, "endpoint", "")),
+            created_at=datetime.now(UTC).isoformat(),
+            attempt=2,
+            repair_attempted=True,
+            structured_mode=str(getattr(provider, "structured_output_mode", None) or None),
+            finalization_policy=str(getattr(provider, "structured_finalization_policy", None) or None),
+            finalization_recovery=True,
+            effective_max_tokens=FINALIZATION_RECOVERY_MAX_TOKENS,
+        ),
+        on_event,
+    )
+    return result
 
 
 def chat_response(
@@ -707,22 +1024,35 @@ def chat_response(
     return result
 
 
-def _extract_json(raw: str) -> object:
+def _extract_json(raw: str, *, _depth: int = 0) -> object:
+    if _depth > 1:
+        raise json.JSONDecodeError("nested JSON string is too deep", raw, 0)
     text = raw.strip()
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
         if text.rstrip().endswith("```"):
             text = text.rstrip()[:-3]
+    text = text.strip()
     try:
-        return json.loads(text)
+        value = json.loads(text)
+        return _extract_json(value, _depth=_depth + 1) if isinstance(value, str) else value
     except json.JSONDecodeError:
+        # Gateways occasionally preserve a trailing comma from a model's JSON
+        # draft. This is a narrow normalization; arbitrary prose or Python
+        # literals are still rejected and never reach schema validation.
+        normalized = re.sub(r",\s*([}\]])", r"\1", text)
+        if normalized != text:
+            try:
+                return json.loads(normalized)
+            except json.JSONDecodeError:
+                pass
         decoder = json.JSONDecoder()
         for index, character in enumerate(text):
             if character not in "[{":
                 continue
             try:
                 value, _ = decoder.raw_decode(text[index:])
-                return value
+                return _extract_json(value, _depth=_depth + 1) if isinstance(value, str) else value
             except json.JSONDecodeError:
                 continue
         raise

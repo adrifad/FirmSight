@@ -23,6 +23,26 @@ class MemoryType(StrEnum):
     ARCHITECTURAL_PATTERN = "ARCHITECTURAL_PATTERN"
     BEHAVIORAL_PATTERN = "BEHAVIORAL_PATTERN"
     REVIEW_LESSON = "REVIEW_LESSON"
+    # Canonical Project Intelligence types (FS-DEV-012 / AGENTS section 28.1).
+    ARCHITECTURE_KNOWLEDGE = "ARCHITECTURE_KNOWLEDGE"
+    CONFIRMED_BUG_PATTERN = "CONFIRMED_BUG_PATTERN"
+    RECURRING_PATTERN = "RECURRING_PATTERN"
+
+
+CANONICAL_INTELLIGENCE_TYPES = {
+    "PROJECT_FACT",
+    "ARCHITECTURE_KNOWLEDGE",
+    "DESIGN_INTENT",
+    "FALSE_POSITIVE_KNOWLEDGE",
+    "CONFIRMED_BUG_PATTERN",
+    "RESOLUTION_PATTERN",
+    "RECURRING_PATTERN",
+}
+
+# Legacy type values that are retained (never silently upgraded). BUG_PATTERN
+# only becomes CONFIRMED_BUG_PATTERN through explicit reclassification backed
+# by record evidence/state; see canonical_intelligence_type.
+RETAINED_LEGACY_TYPES = {"BUG_PATTERN", "REVIEW_LESSON"}
 
 
 # Canonical mapping from legacy memory types to Project Intelligence types.
@@ -30,14 +50,33 @@ LEGACY_TYPE_MIGRATION = {
     "ENGINEERING_FACT": "PROJECT_FACT",
     "DESIGN_INTENT": "DESIGN_INTENT",
     "REJECTED_FINDING": "FALSE_POSITIVE_KNOWLEDGE",
-    "ACCEPTED_FINDING": "BUG_PATTERN",
-    "ENGINEERING_PATTERN": "ARCHITECTURAL_PATTERN",
+    "ACCEPTED_FINDING": "CONFIRMED_BUG_PATTERN",
+    "ENGINEERING_PATTERN": "ARCHITECTURE_KNOWLEDGE",
     "LESSON_LEARNED": "REVIEW_LESSON",
+    "ARCHITECTURAL_PATTERN": "ARCHITECTURE_KNOWLEDGE",
+    "BEHAVIORAL_PATTERN": "ARCHITECTURE_KNOWLEDGE",
 }
 
 
 def canonical_memory_type(value: str) -> str:
     return LEGACY_TYPE_MIGRATION.get(value, value)
+
+
+def canonical_intelligence_type(value: str, state: str | None = None, has_evidence: bool = False) -> str:
+    """Canonical type for a stored record, applied conservatively.
+
+    ARCHITECTURAL_PATTERN/BEHAVIORAL_PATTERN always map to
+    ARCHITECTURE_KNOWLEDGE. BUG_PATTERN maps to CONFIRMED_BUG_PATTERN only
+    when existing evidence/state supports it (verified or reinforced with
+    evidence rows); otherwise the legacy value is retained until explicit
+    reclassification. Uncertain records are never silently upgraded.
+    """
+    mapped = canonical_memory_type(value)
+    if mapped == "BUG_PATTERN":
+        if state in {"VERIFIED", "REINFORCED"} and has_evidence:
+            return "CONFIRMED_BUG_PATTERN"
+        return "BUG_PATTERN"
+    return mapped
 
 
 class MemoryScopeType(StrEnum):

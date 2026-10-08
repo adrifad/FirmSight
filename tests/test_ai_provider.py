@@ -216,6 +216,116 @@ def test_provider_sends_explicit_structured_output_mode(monkeypatch: pytest.Monk
     assert payload["reasoning_effort"] == "high"  # type: ignore[index]
 
 
+def test_deepseek_non_thinking_mode_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"ok"}}]}'
+
+    def successful_urlopen(request: object, **_kwargs: object) -> Response:
+        captured["payload"] = json.loads(request.data.decode("utf-8"))  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr("app.ai_provider.urlopen", successful_urlopen)
+    provider = OpenAICompatibleProvider(
+        "secret",
+        "https://example.test/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="NONE",
+    )
+
+    assert provider.chat_with_metadata("system", "question", structured_schema={"type": "object"}).content == "ok"
+    payload = captured["payload"]  # type: ignore[assignment]
+    assert payload["reasoning_effort"] == "none"  # type: ignore[index]
+    assert payload["thinking"] == {"type": "disabled"}  # type: ignore[index]
+    assert payload["response_format"] == {"type": "json_object"}  # type: ignore[index]
+
+
+def test_deepseek_structured_default_disables_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+    def successful_urlopen(request: object, **_kwargs: object) -> Response:
+        captured["payload"] = json.loads(request.data.decode("utf-8"))  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr("app.ai_provider.urlopen", successful_urlopen)
+    provider = OpenAICompatibleProvider(
+        "secret",
+        "https://example.test/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="UNSPECIFIED",
+    )
+
+    provider.chat_with_metadata("system", "question", structured_schema={"type": "object"})
+    payload = captured["payload"]  # type: ignore[assignment]
+    assert payload["reasoning_effort"] == "none"  # type: ignore[index]
+    assert payload["thinking"] == {"type": "disabled"}  # type: ignore[index]
+
+
+def test_structured_repair_gets_headroom_and_accepts_trailing_comma(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict[str, object]] = []
+    responses = [
+        '{"verdict":"FIXED","notes":"missing closing brace"',
+        '{"verdict":"FIXED","notes":"The repaired response is complete.",}',
+    ]
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            content = responses.pop(0)
+            return json.dumps({"choices": [{"message": {"content": content}}]}).encode("utf-8")
+
+    def successful_urlopen(request: object, **_kwargs: object) -> Response:
+        captured.append(json.loads(request.data.decode("utf-8")))  # type: ignore[attr-defined]
+        return Response()
+
+    monkeypatch.setattr("app.ai_provider.urlopen", successful_urlopen)
+    provider = OpenAICompatibleProvider(
+        "secret",
+        "https://example.test/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        max_tokens=1_000,
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="NONE",
+    )
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert result.verdict == "FIXED"
+    assert captured[0]["max_tokens"] == 1_000
+    assert captured[1]["max_tokens"] == 2_000
+
+
 def test_prompt_only_does_not_send_response_format(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -441,3 +551,268 @@ def test_structured_response_rejects_after_failed_memory_synthesizer_repair() ->
         structured_response(provider, MemorySynthesisResult, MEMORY_SYNTHESIZER_SYSTEM, "Synthesize candidates.")
 
     assert provider.calls == 2
+
+
+def _reasoning_only_length_body(reasoning: str = "private chain of thought") -> bytes:
+    return json.dumps({
+        "choices": [{"finish_reason": "length", "message": {"reasoning_content": reasoning}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 3_200, "total_tokens": 3_300, "completion_tokens_details": {"reasoning_tokens": 3_200}},
+    }).encode()
+
+
+class FinalizationCapture:
+    """Test-only urlopen double capturing payloads and returning scripted bodies."""
+
+    def __init__(self, bodies: list[bytes]) -> None:
+        self.bodies = list(bodies)
+        self.payloads: list[dict] = []
+
+    def __call__(self, request: object, **_kwargs: object) -> object:
+        self.payloads.append(json.loads(request.data.decode("utf-8")))  # type: ignore[attr-defined]
+        body = self.bodies.pop(0) if self.bodies else self.bodies[-1]
+
+        class Response:
+            headers = {"Content-Type": "application/json"}
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return body
+
+        return Response()
+
+
+_FINALIZATION_PROVIDER_KWARGS = {
+    "structured_output_mode": "JSON_OBJECT",
+    "reasoning_effort": "LOW",
+    "structured_finalization_policy": "AUTO",
+}
+
+
+def test_deepseek_reasoning_only_length_triggers_one_finalization_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([
+        _reasoning_only_length_body(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Recovered final JSON after reasoning was disabled."}'}}]}).encode(),
+    ])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert result.verdict == "FIXED"
+    assert len(capture.payloads) == 2
+    initial, recovery = capture.payloads
+    # Recovery contract is materially different: thinking off, bounded budget,
+    # explicit final-JSON instruction in the system prompt.
+    assert initial["reasoning_effort"] == "low"
+    assert initial["thinking"] == {"type": "enabled"}
+    assert recovery["reasoning_effort"] == "none"
+    assert recovery["thinking"] == {"type": "disabled"}
+    assert recovery["max_tokens"] == 1_600
+    assert "FINALIZATION RETRY" in recovery["messages"][0]["content"]
+    assert initial["messages"][1] == recovery["messages"][1]
+
+
+def test_finalization_recovery_failure_is_terminal_and_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body(), _reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+    events: list[object] = []
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)  # type: ignore[arg-type]
+
+    assert len(capture.payloads) == 2
+    exhausted = [event for event in events if getattr(event, "error_kind", None) == "OUTPUT_FINALIZATION_EXHAUSTED"]  # type: ignore[attr-defined]
+    assert len(exhausted) == 1
+    assert getattr(exhausted[0], "finalization_recovery", False) is True  # type: ignore[attr-defined]
+    assert all("private chain" not in repr(event) for event in events)  # type: ignore[attr-defined]
+
+
+def test_finalization_recovery_is_not_attempted_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body(), _reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert len(capture.payloads) == 2
+    assert capture.bodies == []
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429, 500])
+def test_http_errors_do_not_trigger_finalization_recovery(monkeypatch: pytest.MonkeyPatch, status_code: int) -> None:
+    def failing_urlopen(*_args: object, **_kwargs: object) -> None:
+        raise HTTPError("https://example.test/v1/chat/completions", status_code, "error", {}, BytesIO(b"{}"))
+
+    monkeypatch.setattr("app.ai_provider.urlopen", failing_urlopen)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    with pytest.raises(RuntimeError, match=f"HTTP {status_code}"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+
+def test_timeout_does_not_trigger_finalization_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    def hanging_urlopen(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr("app.ai_provider.urlopen", hanging_urlopen)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+
+def test_invalid_json_content_does_not_use_finalization_recovery_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Invalid JSON in an otherwise present message is an ordinary schema
+    # failure: it must flow through the existing repair path, not the
+    # output-limit finalization recovery. A non-DeepSeek model keeps the
+    # DeepSeek-only strict schema retry out of the picture.
+    capture = FinalizationCapture([
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "definitely not json"}}]}).encode(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Ordinary repair path produced valid JSON."}'}}]}).encode(),
+    ])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "glm/flash", max_tokens=2_000, structured_output_mode="JSON_OBJECT", reasoning_effort="UNSPECIFIED", structured_finalization_policy="AUTO")
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert result.verdict == "FIXED"
+    # Initial call + one repair call; no :finalization-retry contract.
+    assert len(capture.payloads) == 2
+    assert all("FINALIZATION RETRY" not in payload["messages"][0]["content"] for payload in capture.payloads)
+
+
+def test_structured_mode_rejection_does_not_trigger_finalization_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    def failing_urlopen(*_args: object, **_kwargs: object) -> None:
+        raise HTTPError("https://example.test/v1/chat/completions", 400, "Bad Request", {}, BytesIO(b'{"error":{"message":"response_format json_object is not supported"}}'))
+
+    monkeypatch.setattr("app.ai_provider.urlopen", failing_urlopen)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+    events: list[object] = []
+
+    with pytest.raises(RuntimeError, match="structured-output mode"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)  # type: ignore[arg-type]
+
+    assert not [event for event in events if getattr(event, "finalization_recovery", False)]  # type: ignore[attr-defined]
+
+
+def test_finalization_policy_never_disables_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, structured_output_mode="JSON_OBJECT", reasoning_effort="LOW", structured_finalization_policy="NEVER")
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert len(capture.payloads) == 1
+
+
+def test_finalization_policy_always_applies_to_non_deepseek(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([
+        _reasoning_only_length_body(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Non DeepSeek provider recovery succeeded."}'}}]}).encode(),
+    ])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "glm/flash", max_tokens=2_000, structured_output_mode="JSON_OBJECT", reasoning_effort="UNSPECIFIED", structured_finalization_policy="ALWAYS")
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert result.verdict == "FIXED"
+    assert len(capture.payloads) == 2
+
+
+def test_auto_policy_skips_non_deepseek_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "glm/flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert len(capture.payloads) == 1
+
+
+def test_auto_policy_skips_deepseek_with_reasoning_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, structured_output_mode="JSON_OBJECT", reasoning_effort="NONE", structured_finalization_policy="AUTO")
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.")
+
+    assert len(capture.payloads) == 1
+
+
+def test_successful_chat_is_never_finalization_recovered(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": "plain chat answer"}}]}).encode()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=2_000, **_FINALIZATION_PROVIDER_KWARGS)
+
+    assert provider.chat("system", "question") == "plain chat answer"
+    assert len(capture.payloads) == 1
+
+
+def test_recovery_pair_exposes_distinct_effective_output_budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([
+        _reasoning_only_length_body(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Recovered final JSON after reasoning was disabled."}'}}]}).encode(),
+    ])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=3_200, **_FINALIZATION_PROVIDER_KWARGS)
+    events: list[object] = []
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)  # type: ignore[arg-type]
+
+    assert result.verdict == "FIXED"
+    by_operation = {}
+    for event in events:  # type: ignore[attr-defined]
+        by_operation.setdefault(getattr(event, "operation", ""), []).append(event)
+    initial = by_operation["structured"]
+    recovery = by_operation["structured:finalization-retry"]
+    # Initial request carries the effective role cap on prepared.
+    prepared = [event for event in initial if getattr(event, "state", None) == "REQUEST_PREPARED"]
+    assert prepared
+    assert all(getattr(event, "effective_max_tokens", None) == 3_200 for event in prepared)
+    # Recovery carries the fixed bounded cap, never the role cap.
+    recovery_prepared = [event for event in recovery if getattr(event, "state", None) == "REQUEST_PREPARED"]
+    validated = [event for event in recovery if getattr(event, "state", None) == "STRUCTURED_VALIDATED"]
+    assert recovery_prepared and validated
+    assert all(getattr(event, "effective_max_tokens", None) == 1_600 for event in recovery_prepared + validated)
+
+
+def test_scheduled_marker_separates_recovery_from_terminal_suppression(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([
+        _reasoning_only_length_body(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Recovered final JSON after reasoning was disabled."}'}}]}).encode(),
+    ])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=3_200, **_FINALIZATION_PROVIDER_KWARGS)
+    events: list[object] = []
+
+    structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)  # type: ignore[arg-type]
+
+    scheduled = [event for event in events if getattr(event, "state", None) == "FINALIZATION_RECOVERY_SCHEDULED"]  # type: ignore[attr-defined]
+    assert len(scheduled) == 1
+    assert scheduled[0].finalization_recovery is False  # type: ignore[attr-defined]
+    assert scheduled[0].retry_suppressed is False  # type: ignore[attr-defined]
+    assert scheduled[0].effective_max_tokens == 1_600  # type: ignore[attr-defined]
+    # The initial request id is reused so the timeline groups as one flow.
+    assert scheduled[0].request_id == events[0].request_id  # type: ignore[attr-defined]
+
+
+def test_no_scheduled_marker_when_policy_blocks_recovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture = FinalizationCapture([_reasoning_only_length_body()])
+    monkeypatch.setattr("app.ai_provider.urlopen", capture)
+    provider = OpenAICompatibleProvider("secret", "https://example.test/v1/chat/completions", "deepseek-v4.1-flash", max_tokens=3_200, structured_output_mode="JSON_OBJECT", reasoning_effort="LOW", structured_finalization_policy="NEVER")
+    events: list[object] = []
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)  # type: ignore[arg-type]
+
+    assert not [event for event in events if getattr(event, "state", None) == "FINALIZATION_RECOVERY_SCHEDULED"]  # type: ignore[attr-defined]

@@ -31,6 +31,9 @@ export type YamlResult = { project_id: string; content: string; valid: boolean; 
 export type Symbol = { name: string; kind: string; file: string; line: number }
 export type OutputBudget = number | 'PROVIDER_DEFAULT'
 export type AISettings = { provider: string; endpoint: string; api_key_configured: boolean; api_key_masked: string | null; api_key_environment: string; models: Record<string, string>; review_context_chars: number; structured_output_mode: 'PROMPT_ONLY' | 'JSON_OBJECT' | 'JSON_SCHEMA'; reasoning_effort: 'UNSPECIFIED' | 'LOW' | 'MEDIUM' | 'HIGH'; investigator_max_tokens: OutputBudget; verifier_max_tokens: OutputBudget; review_parallel_requests: number }
+export type VaultSyncStatus = 'SYNCED' | 'FAILED' | 'INDEX_FAILED' | 'SKIPPED'
+export type VaultSyncState = { project_id: string; status: VaultSyncStatus; counts: Record<string, number>; error_summary: string | null; updated_at: string }
+export type KnowledgeRetryOutcome = { project_id: string; status: VaultSyncStatus; vault: 'SYNCED' | 'FAILED' | 'SKIPPED' | 'UNAVAILABLE'; index: 'SYNCED' | 'INDEX_FAILED' | 'SKIPPED' | 'NOT_RUN'; message: string }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) }, ...options })

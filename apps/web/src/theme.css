@@ -1,0 +1,36 @@
+/* FirmSight theme tokens (TASK-2026-0904).
+
+   Canonical light/dark custom properties for the whole app. Light is the
+   :root default; dark activates via [data-theme="dark"] on <html>. This file
+   is imported first in main.tsx, so styles.css and the page stylesheets stay
+   authoritative wherever they declare the same token names.
+
+   Palette follows the Orchestrum UI direction: neutral surfaces, one accent
+   (the FirmSight lime, darkened for legibility on light surfaces), and
+   restrained status colors. */
+
+:root {
+  color-scheme: light;
+
+  --background: #f6f7f4;
+  --surface: #ffffff;
+  --text: #171b18;
+  --text-muted: #5c655e;
+  --border: #e2e5df;
+  --accent: #4d7c0f;
+  --success: #1b7f4b;
+  --danger: #b3372b;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --background: #111413;
+  --surface: #191d1b;
+  --text: #e8eae6;
+  --text-muted: #9ba39c;
+  --border: #2a2f2c;
+  --accent: #a8f25a;
+  --success: #4ade80;
+  --danger: #f87171;
+}

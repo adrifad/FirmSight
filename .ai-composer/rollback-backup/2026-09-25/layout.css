@@ -1,0 +1,345 @@
+/* FirmSight shared layout scaffold — TASK-2026-0005, tokenized in TASK-2026-0008.
+ *
+ * One source of truth for the page scaffold shared by the Knowledge Base,
+ * Settings, and Memory views so every page reads as the same product:
+ *
+ *   .fs-page / __header / __title / __lede / __actions   page scaffold
+ *   .fs-section__head / __title / __hint                 section heading row
+ *   .fs-card (__head / __title / __body / __foot)        surface panel
+ *   .fs-list / .fs-list__item                            divided rows
+ *   .fs-toolbar / .fs-field                              filters and controls
+ *   .fs-button (--primary / --ghost / --danger)          actions
+ *   .fs-badge (status, dot) / .fs-tag (type, square)     labels
+ *   .fs-note (--info / --ok / --warn / --danger)         inline callouts
+ *   .fs-empty                                            empty state
+ *   .fs-meta / .fs-mono                                  quiet metadata, data
+ *
+ * All colors come from the theme tokens defined in theme.css (--fs-*). This
+ * sheet only owns structural tokens (shape, rhythm, type) so light/dark
+ * themes stay in one place.
+ */
+
+:root {
+  /* Shape and rhythm */
+  --fs-radius: 10px;
+  --fs-radius-small: 6px;
+  --fs-space-1: 4px;
+  --fs-space-2: 8px;
+  --fs-space-3: 12px;
+  --fs-space-4: 16px;
+  --fs-space-5: 24px;
+  --fs-space-6: 32px;
+  --fs-space-7: 48px;
+
+  /* Type */
+  --fs-font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --fs-font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+}
+
+/* Page scaffold ----------------------------------------------------------- */
+
+.fs-page {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: var(--fs-space-6) var(--fs-space-5) var(--fs-space-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--fs-space-5);
+  color: var(--fs-ink);
+  font-family: var(--fs-font-body);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+
+.fs-page__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--fs-space-4);
+  padding-bottom: var(--fs-space-4);
+  border-bottom: 1px solid var(--fs-line);
+}
+
+.fs-page__title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.fs-page__lede {
+  margin: var(--fs-space-1) 0 0;
+  max-width: 62ch;
+  color: var(--fs-ink-soft);
+}
+
+.fs-page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--fs-space-2);
+}
+
+/* Sections ------------------------------------------------------------------ */
+
+.fs-section { display: flex; flex-direction: column; gap: var(--fs-space-3); }
+
+.fs-section__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--fs-space-2) var(--fs-space-4);
+}
+
+.fs-section__title {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.fs-section__hint { margin: 0; font-size: 0.875rem; color: var(--fs-ink-soft); }
+
+/* Cards ----------------------------------------------------------------------- */
+
+.fs-card {
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius);
+}
+
+.fs-card__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fs-space-2) var(--fs-space-3);
+  padding: var(--fs-space-3) var(--fs-space-4);
+  border-bottom: 1px solid var(--fs-line);
+}
+
+.fs-card__title { margin: 0; font-size: 0.9375rem; font-weight: 600; }
+
+.fs-card__body { padding: var(--fs-space-4); }
+
+.fs-card__foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fs-space-2) var(--fs-space-3);
+  padding: var(--fs-space-3) var(--fs-space-4);
+  border-top: 1px solid var(--fs-line);
+}
+
+/* Lists ----------------------------------------------------------------------- */
+
+.fs-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fs-list__item { padding: var(--fs-space-3) var(--fs-space-4); }
+
+.fs-list__item + .fs-list__item { border-top: 1px solid var(--fs-line); }
+
+/* Toolbar and fields ----------------------------------------------------------- */
+
+.fs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--fs-space-3);
+}
+
+.fs-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fs-space-1);
+  min-width: 0;
+}
+
+.fs-field > label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--fs-ink-soft);
+}
+
+.fs-field input,
+.fs-field select,
+.fs-field textarea {
+  font: inherit;
+  color: var(--fs-ink);
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line-strong);
+  border-radius: var(--fs-radius-small);
+  padding: var(--fs-space-2) var(--fs-space-3);
+}
+
+.fs-field input:focus-visible,
+.fs-field select:focus-visible,
+.fs-field textarea:focus-visible {
+  outline: none;
+  border-color: var(--fs-accent);
+  box-shadow: var(--fs-ring);
+}
+
+/* Buttons ---------------------------------------------------------------------- */
+
+.fs-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--fs-space-2);
+  padding: var(--fs-space-2) var(--fs-space-4);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--fs-ink);
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line-strong);
+  border-radius: var(--fs-radius-small);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.fs-button:hover { background: var(--fs-sunken); }
+
+.fs-button:focus-visible { outline: none; box-shadow: var(--fs-ring); }
+
+.fs-button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.fs-button--primary {
+  color: var(--fs-surface);
+  background: var(--fs-accent);
+  border-color: var(--fs-accent);
+}
+
+.fs-button--primary:hover {
+  background: var(--fs-accent-strong);
+  border-color: var(--fs-accent-strong);
+}
+
+.fs-button--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fs-accent);
+}
+
+.fs-button--ghost:hover { background: var(--fs-accent-soft); }
+
+.fs-button--danger {
+  color: var(--fs-danger);
+  background: transparent;
+  border-color: var(--fs-danger);
+}
+
+.fs-button--danger:hover { background: var(--fs-danger-soft); }
+
+/* Badges and tags ---------------------------------------------------------------- */
+
+.fs-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--fs-space-2);
+  padding: 0.125rem var(--fs-space-2);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--fs-sunken);
+  color: var(--fs-ink-soft);
+}
+
+.fs-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.fs-badge--ok { background: var(--fs-ok-soft); color: var(--fs-ok); }
+
+.fs-badge--warn { background: var(--fs-warn-soft); color: var(--fs-warn); }
+
+.fs-badge--danger { background: var(--fs-danger-soft); color: var(--fs-danger); }
+
+.fs-badge--accent { background: var(--fs-accent-soft); color: var(--fs-accent-strong); }
+
+.fs-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem var(--fs-space-2);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--fs-accent-soft);
+  color: var(--fs-accent-strong);
+}
+
+.fs-tag--square { border-radius: var(--fs-radius-small); }
+
+.fs-tag--neutral { background: var(--fs-sunken); color: var(--fs-ink-soft); }
+
+/* Notes -------------------------------------------------------------------------- */
+
+.fs-note {
+  display: flex;
+  gap: var(--fs-space-3);
+  padding: var(--fs-space-3) var(--fs-space-4);
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius);
+  background: var(--fs-surface);
+  color: var(--fs-ink);
+  font-size: 0.875rem;
+}
+
+.fs-note--info {
+  background: var(--fs-accent-soft);
+  border-color: var(--fs-accent-soft);
+  color: var(--fs-accent-strong);
+}
+
+.fs-note--ok {
+  background: var(--fs-ok-soft);
+  border-color: var(--fs-ok-soft);
+  color: var(--fs-ok);
+}
+
+.fs-note--warn {
+  background: var(--fs-warn-soft);
+  border-color: var(--fs-warn-soft);
+  color: var(--fs-warn);
+}
+
+.fs-note--danger {
+  background: var(--fs-danger-soft);
+  border-color: var(--fs-danger-soft);
+  color: var(--fs-danger);
+}
+
+/* Empty state --------------------------------------------------------------------- */
+
+.fs-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--fs-space-2);
+  padding: var(--fs-space-7) var(--fs-space-5);
+  text-align: center;
+  color: var(--fs-ink-soft);
+  background: var(--fs-surface);
+  border: 1px dashed var(--fs-line-strong);
+  border-radius: var(--fs-radius);
+}
+
+/* Metadata and data ----------------------------------------------------------------- */
+
+.fs-meta { font-size: 0.8125rem; color: var(--fs-ink-faint); }
+
+.fs-mono { font-family: var(--fs-font-mono); font-size: 0.875rem; }

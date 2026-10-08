@@ -175,3 +175,53 @@ def test_context_caps_cover_each_source_segment_exactly_once(tmp_path) -> None:
         assert actual == expected
         assert len(actual) == sum(len(batch.segments) for batch in batches)
         assert all("generated_font" not in path for batch in batches for path in batch.files)
+
+
+def test_source_envelope_scales_with_investigator_budget(tmp_path) -> None:
+    database = str(tmp_path / "budget-envelope.db")
+    repository = PlatformRepository(database)
+    projects = ProjectService(repository, FirmwareIndexer())
+    project = projects.create(ProjectCreate(name="Budget envelope"))
+    files = {
+        f"src/task_{index}.c": (f"void task_{index}(void) {{\n" + "  queue_receive();\n" * 400 + "}\n")
+        for index in range(5)
+    }
+    projects.add_files(project.id, files)
+    projects.index(project.id)
+    service = ReviewService(
+        repository,
+        projects,
+        lambda _role: None,  # type: ignore[arg-type]
+        MemoryService(MemoryRepository(database)),
+    )
+    raw_files = repository.raw_files(project.id)
+
+    def segment_chars(budget: int | str | None) -> int:
+        batches = service._context_batches(project.id, project.name, ["concurrency"], raw_files, investigator_budget=budget)
+        assert batches
+        return max(len(batch.context) for batch in batches)
+
+    compact = segment_chars(1_200)
+    default = segment_chars(2_000)
+    generous = segment_chars(3_200)
+    provider_default = segment_chars("PROVIDER_DEFAULT")
+    assert compact < default <= generous
+    assert provider_default == segment_chars(None)
+    # Compact budget still covers every source file across its extra units.
+    for budget in (1_200, 3_200, "PROVIDER_DEFAULT"):
+        batches = service._context_batches(project.id, project.name, ["concurrency"], raw_files, investigator_budget=budget)
+        covered = {path for batch in batches for path in batch.files}
+        assert covered == set(files)
+
+
+def test_source_chars_for_budget_buckets_are_deterministic() -> None:
+    from app.review_service import ReviewService
+
+    assert ReviewService.source_chars_for_budget(1_200) == 12_000
+    assert ReviewService.source_chars_for_budget(1_600) == 16_000
+    assert ReviewService.source_chars_for_budget(2_000) == 20_000
+    assert ReviewService.source_chars_for_budget(2_400) == 24_000
+    assert ReviewService.source_chars_for_budget(3_200) == 30_000
+    assert ReviewService.source_chars_for_budget(2_100) == 24_000
+    assert ReviewService.source_chars_for_budget("PROVIDER_DEFAULT") == ReviewService.DEFAULT_SOURCE_CHARS_FOR_BUDGET
+    assert ReviewService.source_chars_for_budget(None) == ReviewService.DEFAULT_SOURCE_CHARS_FOR_BUDGET

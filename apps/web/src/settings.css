@@ -7,9 +7,12 @@
   gap: 8px 16px;
   align-items: center;
   padding: 16px;
-  border: 1px solid rgba(168, 242, 90, 0.22);
+  /* TASK-2026-0908: the lime tint now mixes from the theme --accent token
+     (theme.css) instead of a hardcoded rgb(168, 242, 90) alpha pair, so both
+     themes track the canonical accent (dark keeps the same lime). */
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
   border-radius: 16px;
-  background: rgba(168, 242, 90, 0.04);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
 }
 .provider-preset-copy { min-width: 0; }
 .provider-preset-copy .eyebrow { margin-bottom: 5px; color: var(--brand-primary); }

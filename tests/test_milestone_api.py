@@ -113,20 +113,27 @@ def test_review_scheduler_mixes_roles_with_shared_concurrency_limit(tmp_path):
 
         def chat(self, system_prompt: str, user_prompt: str) -> str:
             role = "investigator" if "Investigator" in system_prompt else "verifier" if "Verifier" in system_prompt else "other"
-            with self._lock:
-                if self._started_at is None:
-                    self._started_at = time.perf_counter()
-                self.active += 1
-                self.max_active = max(self.max_active, self.active)
-                self.active_roles[role] = self.active_roles.get(role, 0) + 1
-                self.roles_seen.append(role)
-                self.mixed_overlap = self.mixed_overlap or all(self.active_roles.get(name, 0) > 0 for name in ("investigator", "verifier"))
-                if role == "investigator":
-                    self.investigator_started += 1
-                    delay = 0.01 if self.investigator_started == 1 else 0.05
-                else:
-                    delay = 0.03
-                self.sequential_delay += delay
+            # Review-phase bookkeeping covers Investigator/Verifier only: best-effort
+            # Project Intelligence learning shares this provider after the review
+            # completes and is not part of the scheduler's concurrency contract.
+            review_phase = role in ("investigator", "verifier")
+            if review_phase:
+                with self._lock:
+                    if self._started_at is None:
+                        self._started_at = time.perf_counter()
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                    self.active_roles[role] = self.active_roles.get(role, 0) + 1
+                    self.roles_seen.append(role)
+                    self.mixed_overlap = self.mixed_overlap or all(self.active_roles.get(name, 0) > 0 for name in ("investigator", "verifier"))
+                    if role == "investigator":
+                        self.investigator_started += 1
+                        delay = 0.01 if self.investigator_started == 1 else 0.05
+                    else:
+                        delay = 0.03
+                    self.sequential_delay += delay
+            else:
+                delay = 0.0
             try:
                 time.sleep(delay)
                 if "Investigator" in system_prompt:
@@ -147,13 +154,14 @@ def test_review_scheduler_mixes_roles_with_shared_concurrency_limit(tmp_path):
                     return json.dumps({"verdict": "SURVIVES", "notes": "No alternate synchronization is visible."})
                 return super().chat(system_prompt, user_prompt)
             finally:
-                with self._lock:
-                    self.active -= 1
-                    self.active_roles[role] = self.active_roles.get(role, 1) - 1
-                    if self.active_roles[role] <= 0:
-                        self.active_roles.pop(role, None)
-                    if self.active == 0 and self._started_at is not None:
-                        self.wall_elapsed = time.perf_counter() - self._started_at
+                if review_phase:
+                    with self._lock:
+                        self.active -= 1
+                        self.active_roles[role] = self.active_roles.get(role, 1) - 1
+                        if self.active_roles[role] <= 0:
+                            self.active_roles.pop(role, None)
+                        if self.active == 0 and self._started_at is not None:
+                            self.wall_elapsed = time.perf_counter() - self._started_at
 
     provider = DelayedProvider()
     api = TestClient(create_app(str(tmp_path / "scheduler.db"), provider_resolver=lambda _role: provider))
@@ -452,7 +460,7 @@ def test_review_continues_after_an_unusable_investigator_batch(tmp_path):
     assert completed["validated_batches"] == 1
     assert completed["unavailable_batches"] == 1
     assert provider.investigator_calls == 4
-    assert any("batch 1/2 was skipped" in step for step in completed["progress"])
+    assert any("was skipped (stopped: provider request failed" in step for step in completed["progress"])
     assert any("Review is partial: 1 source batch unavailable" in step for step in completed["progress"])
 
     resumed = api.post(f"/api/projects/{project['id']}/reviews/{review['id']}/retry")
@@ -1093,3 +1101,85 @@ def test_provider_settings_persist_without_exposing_api_key(tmp_path):
     assert api.get("/api/settings").json()["models"]["chat"] == "z-ai/glm-5.3-flash"
     invalid = api.put("/api/settings", json={**payload, "endpoint": "ftp://invalid"})
     assert invalid.status_code == 422
+
+
+def test_reasoning_only_review_recovers_via_bounded_finalization_retry(monkeypatch, tmp_path):
+    monkeypatch.setenv("FIRMSIGHT_AI_PROVIDER", "9router")
+    monkeypatch.setenv("FIRMSIGHT_9ROUTER_API_KEY", "test-only-secret")
+    captured: list[dict] = []
+    candidate_json = FixtureProvider(source_path="src/main.c").chat("Investigator", "")
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(request, **kwargs):
+        payload = json.loads(request.data.decode())
+        captured.append(payload)
+        system_prompt = payload["messages"][0]["content"]
+        if "FINALIZATION RETRY" in system_prompt and "Investigator" in system_prompt:
+            body = {"choices": [{"finish_reason": "stop", "message": {"content": candidate_json}}]}
+        elif "Investigator" in system_prompt:
+            body = {"choices": [{"finish_reason": "length", "message": {"reasoning_content": "private chain"}}], "usage": {"completion_tokens": 3_200}}
+        else:
+            body = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"verdict": "SURVIVES", "notes": "The candidate remains supported by the supplied source."})}}]}
+        return Response(json.dumps(body).encode())
+
+    Response.__init__ = lambda self, b: setattr(self, "body", b)
+    Response.read = lambda self: self.body
+
+    monkeypatch.setattr("app.ai_provider.urlopen", fake_urlopen)
+    database = str(tmp_path / "finalization-recovery.db")
+    api = TestClient(create_app(database))
+    settings = api.put("/api/settings", json={
+        "provider": "9router",
+        "endpoint": "http://127.0.0.1:20128/v1/chat/completions",
+        "models": {"investigator": "glm/investigator", "verifier": "glm/verifier"},
+        "reasoning_effort": "LOW",
+        "structured_finalization_policy": "ALWAYS",
+    })
+    assert settings.status_code == 200, settings.text
+    project = api.post("/api/projects", json={"name": "Finalization recovery", "source_type": "MANUAL"}).json()
+    source = (
+        "#include <freertos/semphr.h>\n"
+        "static SemaphoreHandle_t ota_mutex;\n"
+        "esp_err_t ota_install(void) {\n"
+        "    xSemaphoreTake(ota_mutex, portMAX_DELAY);\n"
+        "    esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);\n"
+        "    if (err != ESP_OK) {\n"
+        "        return err;\n"
+        "    }\n"
+        "    xSemaphoreGive(ota_mutex);\n"
+        "    return ESP_OK;\n"
+        "}\n"
+    )
+    assert api.post(f"/api/projects/{project['id']}/files", json={"files": {"src/main.c": source}}).status_code == 200
+
+    started = api.post(f"/api/projects/{project['id']}/reviews", json={"focus": ["concurrency"]}).json()
+    review = api.get(f"/api/projects/{project['id']}/reviews/{started['id']}").json()
+    assert review["status"] == "COMPLETED", review.get("error")
+    findings = api.get(f"/api/projects/{project['id']}/findings").json()
+    assert len(findings) == 1
+    recovery_events = [event for event in review["diagnostics"] if event.get("finalization_recovery")]
+    assert recovery_events
+    assert any(event["state"] == "STRUCTURED_VALIDATED" for event in recovery_events)
+    assert all("private chain" not in json.dumps(event) for event in review["diagnostics"])
+    # REV-026: per-request effective output budget survives persistence and
+    # cannot be conflated with the historical role snapshot.
+    assert all(event.get("effective_max_tokens") == 1_600 for event in recovery_events if event["state"] in {"REQUEST_PREPARED", "COMPLETED", "STRUCTURED_VALIDATED"})
+    scheduled = [event for event in review["diagnostics"] if event["state"] == "FINALIZATION_RECOVERY_SCHEDULED"]
+    assert len(scheduled) == 1
+    assert scheduled[0]["effective_max_tokens"] == 1_600
+    assert scheduled[0]["retry_suppressed"] is False
+    investigator_payloads = [payload for payload in captured if "Investigator" in payload["messages"][0]["content"]]
+    recovery_payloads = [payload for payload in investigator_payloads if "FINALIZATION RETRY" in payload["messages"][0]["content"]]
+    assert recovery_payloads
+    assert recovery_payloads[0]["reasoning_effort"] == "none"
+    assert recovery_payloads[0]["max_tokens"] == 1_600
+    assert "FINALIZATION RETRY" not in investigator_payloads[0]["messages"][0]["content"]

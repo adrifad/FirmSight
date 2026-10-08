@@ -1,0 +1,90 @@
+/* FirmSight theme tokens — TASK-2026-0007.
+ *
+ * Semantic color and elevation custom properties for the light and dark
+ * themes. Light values mirror the palette already in use (styles.css /
+ * layout.css); dark values follow docs/design/palette.png and
+ * docs/design/reference.png — the same green-teal hue family shifted onto
+ * deep green-tinted charcoal surfaces, with accent and status colors
+ * lifted for contrast on dark ground.
+ *
+ * Tokens are namespaced --fs-color-* / --fs-shadow-* so they sit alongside
+ * the existing --fs-* scale in layout.css without overriding it. Nothing
+ * consumes them yet, so importing this file leaves the current look
+ * unchanged; views migrate to the semantic tokens in later tasks.
+ *
+ * The dark theme activates when [data-theme='dark'] is set on <html>.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --fs-color-canvas: #f3f5f4;
+  --fs-color-surface: #ffffff;
+  --fs-color-surface-sunken: #eaeeec;
+
+  /* Text */
+  --fs-color-text: #1f2624;
+  --fs-color-text-muted: #5a6663;
+  --fs-color-text-faint: #8a938f;
+  --fs-color-text-on-accent: #ffffff;
+
+  /* Borders */
+  --fs-color-border: #dfe5e2;
+  --fs-color-border-strong: #c2ccc7;
+
+  /* Accent */
+  --fs-color-accent: #0c5d57;
+  --fs-color-accent-strong: #08453f;
+  --fs-color-accent-soft: #e1efed;
+
+  /* Status */
+  --fs-color-ok: #256e44;
+  --fs-color-ok-soft: #e2f0e7;
+  --fs-color-warn: #8f5f0e;
+  --fs-color-warn-soft: #f6edd9;
+  --fs-color-danger: #a33a28;
+  --fs-color-danger-soft: #f6e5e0;
+
+  /* Elevation */
+  --fs-shadow-sm: 0 1px 2px rgba(31, 38, 36, 0.06);
+  --fs-shadow-md: 0 2px 8px rgba(31, 38, 36, 0.08);
+  --fs-shadow-lg: 0 8px 24px rgba(31, 38, 36, 0.12);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* Surfaces — deep green-tinted charcoal; sunken sits below surface */
+  --fs-color-canvas: #101614;
+  --fs-color-surface: #1a221f;
+  --fs-color-surface-sunken: #141b18;
+
+  /* Text — lifted mint-grey hierarchy */
+  --fs-color-text: #e7edea;
+  --fs-color-text-muted: #a3b1ab;
+  --fs-color-text-faint: #71807a;
+  --fs-color-text-on-accent: #07211e;
+
+  /* Borders */
+  --fs-color-border: #2b3632;
+  --fs-color-border-strong: #41504a;
+
+  /* Accent — brightened teal for contrast on dark ground */
+  --fs-color-accent: #4cc2b2;
+  --fs-color-accent-strong: #6fd6c8;
+  --fs-color-accent-soft: #1e3833;
+
+  /* Status */
+  --fs-color-ok: #6cc58a;
+  --fs-color-ok-soft: #1d3226;
+  --fs-color-warn: #d9a648;
+  --fs-color-warn-soft: #362d1a;
+  --fs-color-danger: #e5836b;
+  --fs-color-danger-soft: #3c241e;
+
+  /* Elevation — heavier shadows now that surfaces are dark */
+  --fs-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --fs-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --fs-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55);
+}

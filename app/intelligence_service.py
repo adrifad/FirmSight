@@ -10,6 +10,7 @@ service may fail a review, decision, resolution, or chat request.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -20,6 +21,8 @@ from fastapi import HTTPException, status
 
 from . import intelligence_core as core
 from .ai_provider import AIProvider, structured_response
+from .i18n import message as _msg
+from .i18n import normalize_locale
 from .intelligence_schemas import (
     CandidateMemory,
     IntelligenceCounts,
@@ -39,6 +42,7 @@ from .prompts import (
     MEMORY_SYNTHESIZER_SYSTEM,
     MEMORY_VERIFIER_PROMPT_VERSION,
     MEMORY_VERIFIER_SYSTEM,
+    with_language,
 )
 from .project_service import ProjectService
 from .repository import MemoryRepository
@@ -79,19 +83,38 @@ class IntelligenceService:
         platform: PlatformRepository,
         projects: ProjectService,
         provider_resolver: Callable[[str], AIProvider],
+        language_resolver: Callable[[], str] | None = None,
     ) -> None:
+        self.language_resolver = language_resolver
         self.repository = repository
         self.platform = platform
         self.projects = projects
         self.provider_resolver = provider_resolver
+
+    def _t(self, key: str, /, **params: object) -> str:
+        try:
+            locale = normalize_locale(self.language_resolver() if self.language_resolver else None)
+        except Exception:  # noqa: BLE001 - error rendering must never raise
+            locale = "en"
+        return _msg(key, locale, **params)
+
+    def _t_locale(self) -> str:
+        try:
+            return normalize_locale(self.language_resolver() if self.language_resolver else None)
+        except Exception:  # noqa: BLE001 - prompt building must never raise
+            return "en"
 
     # ------------------------------------------------------------------
     # Durable learning jobs
     # ------------------------------------------------------------------
 
     def enqueue(self, project_id: str, trigger: str, payload: dict[str, Any]) -> str:
+        idempotency_key = hashlib.sha256(json.dumps({"trigger": trigger, "payload": payload}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        existing = self.repository.find_learning_job_idempotent(project_id, idempotency_key)
+        if existing:
+            return existing["id"]
         job_id = f"LRN-{uuid4().hex[:12].upper()}"
-        self.repository.create_learning_job({
+        inserted = self.repository.create_learning_job({
             "id": job_id,
             "project_id": project_id,
             "trigger": trigger,
@@ -103,16 +126,29 @@ class IntelligenceService:
             "created_at": _now(),
             "started_at": None,
             "completed_at": None,
+            "idempotency_key": idempotency_key,
         })
-        return job_id
+        if inserted:
+            return job_id
+        # A concurrent enqueue may win the unique insert between the lookup
+        # and insert. Return its canonical job instead of abandoning the work.
+        existing = self.repository.find_learning_job_idempotent(project_id, idempotency_key)
+        return existing["id"] if existing else job_id
 
-    def drain_pending_jobs(self, project_id: str) -> None:
-        """Execute queued learning jobs for one project. Never raises."""
+    def drain_pending_jobs(self, project_id: str) -> dict[str, Any]:
+        """Drain all queued jobs for one project; never silently caps work."""
+        drained = 0
         try:
-            for job in self.repository.list_learning_jobs(project_id, status="QUEUED", limit=20):
-                self.execute_job(job["id"])
-        except Exception:  # noqa: BLE001 - background safety boundary
-            pass
+            while True:
+                jobs = self.repository.list_learning_jobs(project_id, status="QUEUED", limit=100)
+                if not jobs:
+                    return {"drained": drained, "remaining": 0, "exhausted": True}
+                for job in jobs:
+                    self.execute_job(job["id"])
+                    drained += 1
+        except Exception as error:  # noqa: BLE001 - background safety boundary
+            remaining = len(self.repository.list_learning_jobs(project_id, status="QUEUED", limit=1))
+            return {"drained": drained, "remaining": remaining, "exhausted": False, "error": _bounded(str(error))}
 
     def run_review_learning(self, review_id: str) -> dict[str, Any]:
         """Enqueue and execute REVIEW_COMPLETED learning; returns the summary row."""
@@ -124,7 +160,7 @@ class IntelligenceService:
     def enqueue_for_review(self, review_id: str) -> str:
         review = self.platform.get_review(review_id)
         if not review:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Review not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.review_not_found"))
         return self.enqueue(review["project_id"], "REVIEW_COMPLETED", {"review_id": review_id})
 
     def execute_job(self, job_id: str) -> None:
@@ -155,7 +191,7 @@ class IntelligenceService:
             synthesis = structured_response(
                 synthesizer,
                 MemorySynthesisResult,
-                MEMORY_SYNTHESIZER_SYSTEM,
+                with_language(MEMORY_SYNTHESIZER_SYSTEM, self._t_locale()),
                 self._synthesizer_prompt(trigger, context),
                 operation=f"memory-synthesizer:{job_id}",
             )
@@ -222,7 +258,7 @@ class IntelligenceService:
             findings = [f for f in self.platform.findings(project_id) if f.get("review_id") == payload.get("review_id")][:MAX_FINDINGS_PER_TRIGGER]
             context.update(review=review, findings=findings)
         elif trigger in {"FINDING_DECISION", "FINDING_RESOLVED", "FINDING_FIX_VERIFIED"}:
-            finding = self.platform.finding(payload.get("finding_id", "")) or {}
+            finding = self.platform.finding(payload.get("finding_id", ""), project_id) or {}
             context.update(finding=finding)
             if trigger == "FINDING_DECISION":
                 reason = _bounded(payload.get("reason"), 2000)
@@ -442,7 +478,7 @@ class IntelligenceService:
         verification = structured_response(
             verifier,
             MemoryVerificationResult,
-            MEMORY_VERIFIER_SYSTEM,
+            with_language(MEMORY_VERIFIER_SYSTEM, self._t_locale()),
             self._verifier_prompt(candidate, context, shortlist),
             operation=f"memory-verifier:{job_id}",
         )
@@ -681,7 +717,10 @@ class IntelligenceService:
         memory_id = f"MEM-{uuid4().hex[:12].upper()}"
         primary_symbol = candidate.symbols[0] if candidate.symbols else None
         component = candidate.components[0] if candidate.components else None
+        topology_snapshot = self.platform.topology_snapshot(project_id) or {}
         scope = {"type": "SYMBOL", "symbol": primary_symbol} if primary_symbol else ({"type": "COMPONENT", "component": component} if component else {"type": "PROJECT"})
+        if topology_snapshot.get("relation_fingerprint"):
+            scope["topology_fingerprint"] = topology_snapshot["relation_fingerprint"]
         payload = context.get("payload") or {}
         source = {
             "type": "AUTOMATIC",
@@ -728,7 +767,13 @@ class IntelligenceService:
             "conflict_summary": None,
             "fingerprint": fingerprint,
         }
-        self.repository.create_memory(record)
+        persisted_id, inserted = self.repository.create_memory_if_absent(record)
+        if not inserted:
+            existing = self.repository.get_memory(persisted_id)
+            if existing:
+                self._reinforce_existing(existing, candidate, context, job_id, {key: 0 for key in ("provisional", "reinforced", "verified", "needs_revalidation", "conflicted", "superseded", "rejected")})
+            return persisted_id
+        memory_id = persisted_id
         links: list[dict[str, Any]] = []
         for index, symbol in enumerate(candidate.symbols[:6]):
             links.append({"memory_id": memory_id, "project_id": project_id, "link_kind": "SYMBOL", "link_value": symbol, "role": "PRIMARY" if index == 0 else "SUPPORTING", "created_at": now})
@@ -910,7 +955,8 @@ class IntelligenceService:
 
     def source_snapshot(self, project_id: str) -> dict[str, Any]:
         files = {file["path"]: file["content_hash"] for file in self.platform.raw_files(project_id)}
-        return {"files": files, "git": self._git_metadata(project_id)}
+        topology = self.platform.topology_snapshot(project_id) or {}
+        return {"files": files, "topology": {"source_snapshot_hash": topology.get("source_snapshot_hash"), "relation_fingerprint": topology.get("relation_fingerprint")}, "git": self._git_metadata(project_id)}
 
     def _git_metadata(self, project_id: str) -> dict[str, Any]:
         """Optional provenance read directly from .git files; never executes Git."""
@@ -954,6 +1000,8 @@ class IntelligenceService:
         """
         current_files = {file["path"]: file["content_hash"] for file in self.platform.raw_files(project_id)}
         current_symbols = {symbol["name"] for symbol in self.platform.list_symbols(project_id, None)}
+        current_topology = self.platform.topology_snapshot(project_id) or {}
+        current_relation_fingerprint = current_topology.get("relation_fingerprint")
         references = self.repository.find_evidence_files(project_id)
         marked: list[str] = []
         reasons: dict[str, str] = {}
@@ -966,7 +1014,12 @@ class IntelligenceService:
             if not record or record.get("state") in {core.SUPERSEDED, core.DISABLED, core.NEEDS_REVALIDATION}:
                 continue
             reason = None
+            recorded_relation_fingerprint = (record.get("scope") or {}).get("topology_fingerprint") if record else None
+            if recorded_relation_fingerprint and current_relation_fingerprint and recorded_relation_fingerprint != current_relation_fingerprint:
+                reason = "The indexed call/task/resource topology changed since this knowledge was observed."
             for ref in refs:
+                if reason:
+                    break
                 if ref["file"] not in current_files:
                     reason = f"Evidence file {ref['file']} is no longer part of the indexed source."
                     break
@@ -1016,9 +1069,9 @@ class IntelligenceService:
     def revalidate_record(self, project_id: str, memory_id: str) -> IntelligenceRevalidateResponse:
         record = self.repository.get_memory(memory_id)
         if not record or record.get("project_id") != project_id:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Intelligence record not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.intelligence_not_found"))
         if record.get("state") in {core.SUPERSEDED, core.DISABLED}:
-            raise HTTPException(status.HTTP_409_CONFLICT, "Terminal records cannot be revalidated")
+            raise HTTPException(status.HTTP_409_CONFLICT, self._t("error.terminal_no_revalidate"))
         verifier = self.provider_resolver("memory_verifier")
         if not verifier.available():
             # Deterministic-only revalidation keeps the API useful without models.
@@ -1155,7 +1208,7 @@ class IntelligenceService:
     def detail(self, memory_id: str) -> IntelligenceDetailRead:
         record = self.repository.get_memory(memory_id)
         if not record:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Intelligence record not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.intelligence_not_found"))
         base = self._record_read(record, evidence_limit=50)
         observations = [
             {
@@ -1188,7 +1241,7 @@ class IntelligenceService:
     def disable(self, memory_id: str, reason: str | None) -> IntelligenceRecordRead:
         record = self.repository.get_memory(memory_id)
         if not record:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Intelligence record not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.intelligence_not_found"))
         if record.get("state") == core.DISABLED:
             return self._record_read(record)
         now = _now()
@@ -1204,13 +1257,46 @@ class IntelligenceService:
         })
         return self._record_read(self.repository.get_memory(memory_id) or record)
 
+    def correct(self, memory_id: str, reason: str) -> IntelligenceRecordRead:
+        """Record an engineer correction without promoting it to verified knowledge."""
+        record = self.repository.get_memory(memory_id)
+        if not record:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.intelligence_not_found"))
+        cleaned = " ".join(reason.split())
+        if len(cleaned) < 8:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, self._t("error.correction_too_short"))
+        now = _now()
+        detail = f"Engineer correction recorded: {cleaned}"
+        self.repository.add_intelligence_observation({
+            "memory_id": memory_id,
+            "project_id": record["project_id"],
+            "kind": "ENGINEER_CORRECTION",
+            "from_state": record.get("state"),
+            "to_state": record.get("state"),
+            "detail": detail,
+            "created_at": now,
+        })
+        self.repository.add_intelligence_evidence([{
+            "memory_id": memory_id,
+            "project_id": record["project_id"],
+            "kind": "ENGINEER",
+            "file": None,
+            "line": None,
+            "symbol": None,
+            "file_hash": None,
+            "description": detail,
+            "fingerprint": core.evidence_fingerprint("ENGINEER", None, None, None, detail),
+            "created_at": now,
+        }])
+        return self._record_read(self.repository.get_memory(memory_id) or record)
+
     def learning_summary(self, project_id: str, review_id: str) -> ReviewLearningSummaryRead:
         review = self.platform.get_review(review_id)
         if not review or review["project_id"] != project_id:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Review not found")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.review_not_found"))
         row = self.repository.get_review_learning_summary(review_id)
         if not row:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "No learning summary exists for this review")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, self._t("error.no_learning_summary"))
         counts = row.get("counts") or {}
         return ReviewLearningSummaryRead(
             review_id=review_id,

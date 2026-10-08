@@ -1,0 +1,196 @@
+/* FirmSight app shell: sidebar structure + content contract.
+   Imported last in main.tsx so these rules win ties with styles.css.
+   Spacing and structure come from the tokens below; color is derived from
+   currentColor so the shell follows the styles.css theme without hardcoding. */
+
+:root {
+  --sidebar-width: 280px;
+  --sidebar-pad-x: 16px;
+  --nav-item-height: 40px;
+  --nav-item-height-compact: 36px;
+  --nav-item-gap: 10px;
+  --nav-item-pad-x: 12px;
+  --nav-item-radius: 8px;
+  --nav-list-gap: 2px;
+  --nav-hover-bg: color-mix(in srgb, currentColor 7%, transparent);
+  --nav-active-bg: color-mix(in srgb, currentColor 10%, transparent);
+  --nav-muted-opacity: 0.55;
+  --content-max: 1180px;
+  --content-pad-x: 24px;
+  --content-pad-y: 24px;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --content-pad-x: 16px;
+    --content-pad-y: 16px;
+  }
+}
+
+/* ---- Sidebar ---- */
+
+/* One width for every breakpoint, written as a single min() so a minimum can
+   never fight the narrow-viewport cap: 280px, or 86vw once the viewport is
+   narrower than ~326px. No min-width on the drawer, anywhere. */
+.app-sidebar {
+  flex: 0 0 auto;
+  width: min(var(--sidebar-width), 86vw);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-brand {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px var(--sidebar-pad-x);
+}
+
+.sidebar-brand img {
+  display: block;
+}
+
+.sidebar-brand-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sidebar-close {
+  flex: 0 0 auto;
+}
+
+/* Scrollable middle so the footer stays pinned. */
+.sidebar-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--nav-list-gap);
+  padding: 4px var(--sidebar-pad-x) 16px;
+}
+
+.sidebar-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--nav-list-gap);
+}
+
+.sidebar-nav .sidebar-group-label {
+  margin: 14px 0 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: var(--nav-muted-opacity);
+}
+
+.sidebar-nav .sidebar-group:first-child .sidebar-group-label {
+  margin-top: 2px;
+}
+
+/* Uniform drawer hit area: full width, one height, one radius. Buttons are
+   reset here so styles.css only themes states, never structure. */
+.sidebar-nav .nav-item,
+.sidebar-footer .nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--nav-item-gap);
+  width: 100%;
+  min-height: var(--nav-item-height);
+  padding: 0 var(--nav-item-pad-x);
+  border: 0;
+  border-radius: var(--nav-item-radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nav-item svg {
+  flex: 0 0 auto;
+}
+
+.nav-item:hover {
+  background: var(--nav-hover-bg);
+}
+
+.nav-item.active,
+.nav-item[aria-current='page'] {
+  background: var(--nav-active-bg);
+  font-weight: 600;
+}
+
+.sidebar-footer {
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding: 10px var(--sidebar-pad-x) calc(10px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* TASK-2026-0911: the theme toggle lives in the sidebar footer and must stay
+   visible and clickable in every shell mode — narrow drawer, wide desktop
+   (1280px+), and fullscreen. No viewport media query may hide it: these
+   unconditional declarations are the visibility contract, and because this
+   stylesheet is imported last they win ties against any width-scoped hide
+   rule elsewhere. */
+.sidebar-footer .theme-toggle {
+  display: inline-flex;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* ---- Desktop top bar navigation ---- */
+
+.desktop-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.desktop-nav .nav-item {
+  width: auto;
+  min-height: var(--nav-item-height-compact);
+}
+
+/* ---- Content contract ---- */
+
+/* The shell owns the content region for EVERY route, unconditionally: no
+   :has(), no dependence on which root class a page renders. Whatever App.tsx
+   mounts inside the content region gets the same padding, the same 1180px
+   measure, and the same centering — .page-stack pages, plain-section pages,
+   and loading/empty/error states alike. The max-width is border-box, so the
+   1180px measure is what remains inside the padding. */
+#root main,
+#root .app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  max-width: calc(var(--content-max) + 2 * var(--content-pad-x));
+  margin-inline: auto;
+  padding: var(--content-pad-y) var(--content-pad-x);
+}
+
+/* Page roots contribute vertical rhythm only. The box model (padding,
+   measure, centering) stays owned by the content region above, and legacy
+   styles.css box-model rules on .page-stack are zeroed so nothing double-pads
+   or re-caps the measure. */
+.page-stack {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+}

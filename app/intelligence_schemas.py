@@ -66,6 +66,8 @@ class IntelligenceObservationKind(StrEnum):
     SUPERSESSION = "SUPERSESSION"
     DISABLE = "DISABLE"
     MIGRATION = "MIGRATION"
+    ENGINEER_CORRECTION = "ENGINEER_CORRECTION"
+    ENGINEER_MARKDOWN_EDIT = "ENGINEER_MARKDOWN_EDIT"
 
 
 class LearningTrigger(StrEnum):
@@ -74,6 +76,13 @@ class LearningTrigger(StrEnum):
     FINDING_RESOLVED = "FINDING_RESOLVED"
     FINDING_FIX_VERIFIED = "FINDING_FIX_VERIFIED"
     CHAT_CANDIDATE = "CHAT_CANDIDATE"
+    # FS-DEV-012 extended triggers.
+    SOURCE_CHANGE = "SOURCE_CHANGE"
+    YAML_CHANGE = "YAML_CHANGE"
+    REVALIDATION = "REVALIDATION"
+    VERIFIER_RESULT = "VERIFIER_RESULT"
+    ENGINEER_CORRECTION = "ENGINEER_CORRECTION"
+    REPEATED_OBSERVATION = "REPEATED_OBSERVATION"
 
 
 class LearningJobStatus(StrEnum):
@@ -95,7 +104,7 @@ class CandidateEvidence(BaseModel):
 
 
 class CandidateMemory(BaseModel):
-    type: str = Field(pattern="^(PROJECT_FACT|DESIGN_INTENT|FALSE_POSITIVE_KNOWLEDGE|BUG_PATTERN|RESOLUTION_PATTERN|ARCHITECTURAL_PATTERN|BEHAVIORAL_PATTERN|REVIEW_LESSON)$")
+    type: str = Field(pattern="^(PROJECT_FACT|ARCHITECTURE_KNOWLEDGE|DESIGN_INTENT|FALSE_POSITIVE_KNOWLEDGE|CONFIRMED_BUG_PATTERN|RESOLUTION_PATTERN|RECURRING_PATTERN|BUG_PATTERN|ARCHITECTURAL_PATTERN|BEHAVIORAL_PATTERN|REVIEW_LESSON)$")
     statement: str = Field(min_length=16, max_length=600)
     confidence: float = Field(ge=0, le=1)
     observed: bool
@@ -277,3 +286,7 @@ class IntelligenceRevalidateResponse(BaseModel):
 
 class IntelligenceDisableRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=2000)
+
+
+class IntelligenceCorrectionRequest(BaseModel):
+    reason: str = Field(min_length=8, max_length=2000)

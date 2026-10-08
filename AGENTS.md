@@ -17,24 +17,24 @@ FirmSight may be developed using multiple coding agents.
 The supported development roles are:
 
 ```text
-Codex
+Orchestrator
   ↓
 Planner / Architect / Reviewer / Gatekeeper
   ↓
 TASKS.md
   ↓
-OpenCode
+Implementor
   ↓
 Developer / Debugger / Test Executor
   ↓
 IMPLEMENTATION.md + source changes
   ↓
-Codex
+Orchestrator
   ↓
 REVIEW.md
   ↓
 PASS → Done
-FAIL → OpenCode rework
+FAIL → Implementor rework
 ```
 
 This workflow is part of the repository development process.
@@ -56,7 +56,7 @@ Do not confuse the repository-development agents with FirmSight product agents.
 
 ## 0.1 Shared Source of Truth
 
-`AGENTS.md` is shared by both Codex and OpenCode.
+`AGENTS.md` is shared by both Orchestrator and Implementor.
 
 Both agents must read this entire file before performing repository work.
 
@@ -67,8 +67,8 @@ Agent identity must be explicitly supplied by the launcher, wrapper, CLI invocat
 Recommended runtime identities:
 
 ```text
-codex
-opencode
+orchestrator
+implementor
 ```
 
 ## 0.1.1 Required Role Model Binding
@@ -76,8 +76,8 @@ opencode
 The repository-development workflow uses the following model assignment:
 
 ```text
-CODEX     → gpt-5.6-terra
-OPENCODE  → gpt-5.6-luna
+ORCHESTRATOR     → gpt-5.6-terra
+IMPLEMENTOR  → gpt-5.6-luna
 ```
 
 `gpt-5.6-terra` is the planner, architecture reviewer, and acceptance
@@ -92,34 +92,34 @@ gain the wrong permissions.
 Recommended environment variable:
 
 ```text
-FIRMSIGHT_AGENT_ROLE=codex
+FIRMSIGHT_AGENT_ROLE=orchestrator
 ```
 
 or:
 
 ```text
-FIRMSIGHT_AGENT_ROLE=opencode
+FIRMSIGHT_AGENT_ROLE=implementor
 ```
 
 Recommended model-binding variable:
 
 ```text
-FIRMSIGHT_AGENT_MODEL=gpt-5.6-terra   # CODEX
-FIRMSIGHT_AGENT_MODEL=gpt-5.6-luna    # OPENCODE
+FIRMSIGHT_AGENT_MODEL=gpt-5.6-terra   # ORCHESTRATOR
+FIRMSIGHT_AGENT_MODEL=gpt-5.6-luna    # IMPLEMENTOR
 ```
 
 The orchestrator may additionally place the role in the initial instruction:
 
 ```text
-You are running as CODEX.
-Follow the CODEX role defined in AGENTS.md.
+You are running as ORCHESTRATOR.
+Follow the ORCHESTRATOR role defined in AGENTS.md.
 ```
 
 or:
 
 ```text
-You are running as OPENCODE.
-Follow the OPENCODE role defined in AGENTS.md.
+You are running as IMPLEMENTOR.
+Follow the IMPLEMENTOR role defined in AGENTS.md.
 ```
 
 Role identity must never be inferred from:
@@ -155,8 +155,8 @@ At the beginning of an orchestrated development run, resolve identity in this or
 Valid normalized identities:
 
 ```text
-CODEX
-OPENCODE
+ORCHESTRATOR
+IMPLEMENTOR
 ```
 
 Once identity is resolved, the agent must remain in that role for the entire run.
@@ -166,24 +166,24 @@ An agent must not switch roles merely because another workflow stage is incomple
 Example:
 
 ```text
-CODEX must not start implementing application code
-just because OPENCODE has not finished yet.
+ORCHESTRATOR must not start implementing application code
+just because IMPLEMENTOR has not finished yet.
 
-OPENCODE must not approve its own implementation
-just because CODEX has not reviewed it yet.
+IMPLEMENTOR must not approve its own implementation
+just because ORCHESTRATOR has not reviewed it yet.
 ```
 
 ---
 
-## 0.3 Codex Role
+## 0.3 Orchestrator Role
 
 When identity is:
 
 ```text
-CODEX
+ORCHESTRATOR
 ```
 
-Codex acts as:
+Orchestrator acts as:
 
 - planner,
 - task author,
@@ -192,14 +192,14 @@ Codex acts as:
 - acceptance gatekeeper,
 - regression reviewer.
 
-Codex owns:
+Orchestrator owns:
 
 ```text
 .ai/TASKS.md
 .ai/REVIEW.md
 ```
 
-Codex may read:
+Orchestrator may read:
 
 - all repository source files,
 - tests,
@@ -208,17 +208,17 @@ Codex may read:
 - `git diff`,
 - `git status`,
 - build/test reports,
-- OpenCode implementation reports.
+- Implementor implementation reports.
 
-Codex should normally **not modify product source code** during the implementation/review loop.
+Orchestrator should normally **not modify product source code** during the implementation/review loop.
 
 Its job is to define what must be done and judge whether the result satisfies the task.
 
-Codex must not approve work based only on OpenCode's written report.
+Orchestrator must not approve work based only on Implementor's written report.
 
-Codex must inspect the actual repository state and relevant diffs.
+Orchestrator must inspect the actual repository state and relevant diffs.
 
-### Codex responsibilities
+### Orchestrator responsibilities
 
 Before implementation:
 
@@ -247,12 +247,12 @@ relevant source
     +
 test/build evidence
     ↓
-CODEX REVIEW
+ORCHESTRATOR REVIEW
     ↓
 .ai/REVIEW.md
 ```
 
-Codex review verdict must be exactly one of:
+Orchestrator review verdict must be exactly one of:
 
 ```text
 PASS
@@ -267,14 +267,14 @@ PASS
 Implementation satisfies the task and acceptance criteria.
 
 FAIL
-Implementation contains actionable issues that OpenCode must fix.
+Implementation contains actionable issues that Implementor must fix.
 
 BLOCKED
 Review cannot be completed because required evidence,
 repository state, dependency, or test result is unavailable.
 ```
 
-Codex must provide actionable review findings.
+Orchestrator must provide actionable review findings.
 
 A review finding should include:
 
@@ -288,7 +288,7 @@ Required Fix
 Acceptance Condition
 ```
 
-Codex must not use vague feedback such as:
+Orchestrator must not use vague feedback such as:
 
 ```text
 Improve this.
@@ -300,15 +300,15 @@ without explaining why.
 
 ---
 
-## 0.4 OpenCode Role
+## 0.4 Implementor Role
 
 When identity is:
 
 ```text
-OPENCODE
+IMPLEMENTOR
 ```
 
-OpenCode acts as:
+Implementor acts as:
 
 - implementation engineer,
 - debugger,
@@ -316,7 +316,7 @@ OpenCode acts as:
 - build executor,
 - test executor.
 
-OpenCode owns:
+Implementor owns:
 
 ```text
 source-code changes
@@ -324,7 +324,7 @@ test changes
 .ai/IMPLEMENTATION.md
 ```
 
-OpenCode must read:
+Implementor must read:
 
 ```text
 AGENTS.md
@@ -334,18 +334,18 @@ AGENTS.md
 
 before modifying source code.
 
-OpenCode must implement the task defined by Codex.
+Implementor must implement the task defined by Orchestrator.
 
-OpenCode must not silently redefine:
+Implementor must not silently redefine:
 
 - requirements,
 - architecture decisions,
 - acceptance criteria,
 - task scope.
 
-If implementation reveals that the task is impossible or materially incorrect, OpenCode must report the issue in `IMPLEMENTATION.md` rather than silently changing the requested behavior.
+If implementation reveals that the task is impossible or materially incorrect, Implementor must report the issue in `IMPLEMENTATION.md` rather than silently changing the requested behavior.
 
-### OpenCode responsibilities
+### Implementor responsibilities
 
 Normal implementation flow:
 
@@ -373,7 +373,7 @@ When `REVIEW.md` has verdict:
 FAIL
 ```
 
-OpenCode must:
+Implementor must:
 
 ```text
 Read REVIEW.md
@@ -384,12 +384,12 @@ Build / Test Again
     ↓
 Update IMPLEMENTATION.md
     ↓
-Return control to Codex
+Return control to Orchestrator
 ```
 
-OpenCode must **not** mark the work as finally approved.
+Implementor must **not** mark the work as finally approved.
 
-Only Codex may issue final repository-development approval in this workflow.
+Only Orchestrator may issue final repository-development approval in this workflow.
 
 ---
 
@@ -416,17 +416,17 @@ They are not FirmSight product data.
 Owner:
 
 ```text
-CODEX
+ORCHESTRATOR
 ```
 
-OpenCode must treat `TASKS.md` as read-only unless explicitly instructed otherwise.
+Implementor must treat `TASKS.md` as read-only unless explicitly instructed otherwise.
 
 Recommended format:
 
 ```markdown
 ---
 artifact: task
-owner: codex
+owner: orchestrator
 status: ready
 iteration: 1
 task_id: FS-DEV-001
@@ -480,17 +480,17 @@ Do not over-prescribe implementation details when multiple valid implementations
 Owner:
 
 ```text
-OPENCODE
+IMPLEMENTOR
 ```
 
-Codex must treat it as implementation evidence, not unquestionable truth.
+Orchestrator must treat it as implementation evidence, not unquestionable truth.
 
 Recommended format:
 
 ```markdown
 ---
 artifact: implementation
-owner: opencode
+owner: implementor
 status: completed
 iteration: 1
 task_id: FS-DEV-001
@@ -530,20 +530,20 @@ Relevant failures and fixes.
 
 # Known Limitations
 
-Anything Codex should inspect carefully.
+Anything Orchestrator should inspect carefully.
 
 # Review Request
 
-State that the implementation is ready for Codex review.
+State that the implementation is ready for Orchestrator review.
 ```
 
-OpenCode must not write:
+Implementor must not write:
 
 ```text
 Final approval: PASS
 ```
 
-because approval belongs to Codex.
+because approval belongs to Orchestrator.
 
 ---
 
@@ -552,17 +552,17 @@ because approval belongs to Codex.
 Owner:
 
 ```text
-CODEX
+ORCHESTRATOR
 ```
 
-OpenCode must treat the file as read-only review input.
+Implementor must treat the file as read-only review input.
 
 Recommended format:
 
 ```markdown
 ---
 artifact: review
-owner: codex
+owner: orchestrator
 status: changes_requested
 verdict: FAIL
 iteration: 1
@@ -609,7 +609,7 @@ PASS
 
 # Next Action
 
-OpenCode must address REV-001 and return for another review.
+Implementor must address REV-001 and return for another review.
 ```
 
 When the implementation is accepted:
@@ -617,7 +617,7 @@ When the implementation is accepted:
 ```markdown
 ---
 artifact: review
-owner: codex
+owner: orchestrator
 status: approved
 verdict: PASS
 iteration: 2
@@ -639,7 +639,7 @@ Preferred owner:
 ORCHESTRATOR
 ```
 
-Neither Codex nor OpenCode should depend on `STATE.md` as the sole source of truth.
+Neither Orchestrator nor Implementor should depend on `STATE.md` as the sole source of truth.
 
 Actual repository state remains authoritative.
 
@@ -665,7 +665,7 @@ owner: orchestrator
 task_id: FS-DEV-001
 state: READY_FOR_REVIEW
 iteration: 1
-active_agent: codex
+active_agent: orchestrator
 ---
 ```
 
@@ -683,14 +683,14 @@ USER REQUEST
      ▼
 PLANNING
      │
-     │ CODEX
+     │ ORCHESTRATOR
      ▼
 TASKS.md
      │
      ▼
 READY_FOR_IMPLEMENTATION
      │
-     │ OPENCODE
+     │ IMPLEMENTOR
      ▼
 IMPLEMENTING
      │
@@ -702,7 +702,7 @@ IMPLEMENTING
      ▼
 READY_FOR_REVIEW
      │
-     │ CODEX
+     │ ORCHESTRATOR
      ▼
 REVIEW
    ┌─┴───────────────┐
@@ -712,7 +712,7 @@ REVIEW
    ▼                 ▼
 CHANGES_REQUESTED   APPROVED
    │
-   │ OPENCODE
+   │ IMPLEMENTOR
    ▼
 REWORK
    │
@@ -755,7 +755,7 @@ agent claims
 
 Examples:
 
-OpenCode saying:
+Implementor saying:
 
 ```text
 All tests pass.
@@ -763,7 +763,7 @@ All tests pass.
 
 is not enough if no test evidence exists.
 
-Codex saying:
+Orchestrator saying:
 
 ```text
 No files were changed.
@@ -780,22 +780,22 @@ Always inspect repository evidence.
 The workflow must enforce separation of duties.
 
 ```text
-OpenCode implements.
-Codex reviews.
+Implementor implements.
+Orchestrator reviews.
 ```
 
 Therefore:
 
-- OpenCode must not approve its own implementation.
-- Codex must not bypass review by silently implementing the requested feature itself.
-- Codex may suggest fixes but should return implementation work to OpenCode.
+- Implementor must not approve its own implementation.
+- Orchestrator must not bypass review by silently implementing the requested feature itself.
+- Orchestrator may suggest fixes but should return implementation work to Implementor.
 - Human engineers remain the final authority and may override either agent.
 
 ---
 
 ## 0.13 Review Feedback Loop
 
-Every Codex rejection must be consumable by OpenCode without additional interpretation.
+Every Orchestrator rejection must be consumable by Implementor without additional interpretation.
 
 Bad review:
 
@@ -829,7 +829,7 @@ A test containing `../../outside.txt` must be rejected and no file
 may be written outside the temporary import root.
 ```
 
-OpenCode should reference resolved review IDs in the next implementation report:
+Implementor should reference resolved review IDs in the next implementation report:
 
 ```text
 Resolved:
@@ -842,7 +842,7 @@ Resolved:
 
 ## 0.14 Task Scope Changes
 
-OpenCode may discover required work that was not visible during planning.
+Implementor may discover required work that was not visible during planning.
 
 It must not silently expand scope.
 
@@ -863,7 +863,7 @@ Suggested action:
 ...
 ```
 
-Codex then decides whether to:
+Orchestrator then decides whether to:
 
 ```text
 ACCEPT_SCOPE_CHANGE
@@ -890,7 +890,7 @@ Do not use `BLOCKED` simply because implementation is difficult.
 
 ## 0.16 Shared Markdown Communication Rule
 
-Codex and OpenCode are allowed and encouraged to communicate through Markdown coordination files.
+Orchestrator and Implementor are allowed and encouraged to communicate through Markdown coordination files.
 
 Markdown is preferred because:
 
@@ -915,10 +915,10 @@ The external orchestrator should explicitly launch the correct role.
 Conceptually:
 
 ```bash
-FIRMSIGHT_AGENT_ROLE=codex \
+FIRMSIGHT_AGENT_ROLE=orchestrator \
 FIRMSIGHT_AGENT_MODEL=gpt-5.6-terra \
-codex exec "
-You are running as CODEX.
+orchestrator exec "
+You are running as ORCHESTRATOR.
 Read AGENTS.md.
 Create or update .ai/TASKS.md for the current request.
 Do not implement product source code.
@@ -928,10 +928,10 @@ Do not implement product source code.
 Then:
 
 ```bash
-FIRMSIGHT_AGENT_ROLE=opencode \
+FIRMSIGHT_AGENT_ROLE=implementor \
 FIRMSIGHT_AGENT_MODEL=gpt-5.6-luna \
-opencode run --agent developer "
-You are running as OPENCODE.
+implementor run --agent developer "
+You are running as IMPLEMENTOR.
 Read AGENTS.md and .ai/TASKS.md.
 Implement the task, build/test it, and update .ai/IMPLEMENTATION.md.
 Do not approve your own work.
@@ -941,10 +941,10 @@ Do not approve your own work.
 Then:
 
 ```bash
-FIRMSIGHT_AGENT_ROLE=codex \
+FIRMSIGHT_AGENT_ROLE=orchestrator \
 FIRMSIGHT_AGENT_MODEL=gpt-5.6-terra \
-codex exec "
-You are running as CODEX.
+orchestrator exec "
+You are running as ORCHESTRATOR.
 Read AGENTS.md, .ai/TASKS.md, and .ai/IMPLEMENTATION.md.
 Inspect the real git diff and relevant source.
 Write .ai/REVIEW.md.
@@ -958,9 +958,9 @@ The role contract must remain explicit.
 
 ---
 
-## 0.18 OpenCode Agent Configuration
+## 0.18 Implementor Agent Configuration
 
-OpenCode should have a dedicated developer agent configuration.
+Implementor should have a dedicated developer agent configuration.
 
 Conceptual behavior:
 
@@ -969,7 +969,7 @@ Name:
 developer
 
 Identity:
-OPENCODE
+IMPLEMENTOR
 
 Model:
 gpt-5.6-luna
@@ -982,42 +982,42 @@ testing
 
 Forbidden:
 final approval
-editing Codex-owned coordination files
+editing Orchestrator-owned coordination files
 silently redefining requirements
 ```
 
 Its initial instruction must explicitly state:
 
 ```text
-You are OPENCODE, the implementation engineer in the FirmSight
-Codex/OpenCode workflow.
+You are IMPLEMENTOR, the implementation engineer in the FirmSight
+Orchestrator/Implementor workflow.
 
-Follow the OPENCODE role in AGENTS.md.
+Follow the IMPLEMENTOR role in AGENTS.md.
 ```
 
 This makes role identity deterministic even if the underlying model changes.
 
 ---
 
-## 0.19 Codex Invocation Contract
+## 0.19 Orchestrator Invocation Contract
 
-Every orchestrated Codex invocation should explicitly state:
+Every orchestrated Orchestrator invocation should explicitly state:
 
 ```text
-You are CODEX, the planner/reviewer/gatekeeper in the
-FirmSight Codex/OpenCode workflow.
+You are ORCHESTRATOR, the planner/reviewer/gatekeeper in the
+FirmSight Orchestrator/Implementor workflow.
 
-Follow the CODEX role in AGENTS.md.
+Follow the ORCHESTRATOR role in AGENTS.md.
 ```
 
-Codex must be launched with:
+Orchestrator must be launched with:
 
 ```text
 Model:
 gpt-5.6-terra
 ```
 
-Do not rely only on Codex recognizing its own product name.
+Do not rely only on Orchestrator recognizing its own product name.
 
 The workflow should remain correct even if the underlying model or runtime implementation changes.
 
@@ -1025,7 +1025,7 @@ The workflow should remain correct even if the underlying model or runtime imple
 
 ## 0.20 Human Authority
 
-Codex is the automated review gatekeeper.
+Orchestrator is the automated review gatekeeper.
 
 It is **not** the ultimate engineering authority.
 
@@ -1036,15 +1036,15 @@ Human Engineer
     >
 Verified Repository Evidence
     >
-Codex Review
+Orchestrator Review
     >
-OpenCode Implementation Report
+Implementor Implementation Report
 ```
 
 A human engineer may:
 
 - modify a task,
-- reject Codex feedback,
+- reject Orchestrator feedback,
 - approve an exception,
 - stop an agent loop,
 - request a different implementation,
@@ -1066,7 +1066,9 @@ Its purpose is to help engineers:
 - review concurrency and RTOS behavior,
 - challenge AI findings,
 - reduce false positives,
-- retain engineering lessons learned,
+- evolve project-specific intelligence from review history and source evidence,
+- maintain a searchable Markdown knowledge base compatible with Obsidian,
+- retrieve relevant knowledge through RAG,
 - generate `firmware.ai.yaml`,
 - and build reusable project knowledge over time.
 
@@ -1290,11 +1292,50 @@ Investigator
 Verifier / Skeptic
 Project Assistant
 YAML Generator
-Memory Extractor
+Memory Synthesizer
+Memory Verifier
+Knowledge Retriever / Reranker
 Context Summarizer
 ```
 
+Responsibilities:
+
+```text
+Investigator
+Find realistic candidate firmware issues from current source evidence.
+
+Verifier / Skeptic
+Attempt to disprove candidate findings using current source,
+project intelligence, and relevant historical evidence.
+
+Project Assistant
+Answer project-aware questions using the same evidence hierarchy
+as the review pipeline.
+
+YAML Generator
+Generate and validate firmware.ai.yaml from source-observed facts
+plus engineer-declared requirements.
+
+Memory Synthesizer
+Extract new candidate project knowledge from completed reviews,
+finding decisions, fixes, repeated patterns, and meaningful chat context.
+
+Memory Verifier
+Validate candidate knowledge against current source evidence,
+existing knowledge, project history, and deterministic relationships.
+
+Knowledge Retriever / Reranker
+Retrieve only the knowledge relevant to the current code, symbol,
+component, finding, review, or question.
+
+Context Summarizer
+Compress retrieved evidence without turning assumptions into facts.
+```
+
 Prompts must be versioned and stored outside UI code.
+
+AI roles must not bypass deterministic validation, project scoping,
+knowledge lifecycle rules, or source-of-truth ordering.
 
 ---
 
@@ -1691,7 +1732,8 @@ AI Review
 Findings
 AI Chat
 Architecture
-Engineering Memory
+Project Intelligence
+Knowledge Base
 YAML Generator
 Project Settings
 ```
@@ -1714,7 +1756,7 @@ Do not automatically seed:
 - Demo Project,
 - fake findings,
 - fake review history,
-- fake Engineering Memory,
+- fake Project Intelligence,
 - fake metrics.
 
 Mock data is allowed only in:
@@ -1896,6 +1938,22 @@ OTA Flow
 
 AI must receive only context relevant to the current question or review.
 
+FirmSight must use a structured **Context Builder** instead of blindly
+sending the entire repository, entire knowledge vault, or all previous
+reviews to the model.
+
+Context may be assembled from:
+
+```text
+Current Source Evidence
+Project Index
+firmware.ai.yaml
+Relevant Project Intelligence
+Relevant Requirements / ADRs
+Relevant Historical Findings / Resolutions
+Current User Query
+```
+
 Example user question:
 
 > Could MQTT disconnect cause OTA installation failure?
@@ -1906,14 +1964,65 @@ Context retrieval should attempt to include:
 - OTA task,
 - MQTT state,
 - OTA state,
-- callers,
-- relevant queues,
-- event groups,
-- engineering memories,
-- `firmware.ai.yaml`,
-- project requirements.
+- callers and callees,
+- relevant queues / mutexes / event groups,
+- matching project-intelligence notes,
+- relevant previous findings or resolutions,
+- related `firmware.ai.yaml` requirements,
+- architecture decisions when relevant.
 
-Avoid sending unrelated source files.
+Avoid sending unrelated source files or unrelated knowledge notes.
+
+## 23.1 Retrieval Strategy
+
+FirmSight should use **hybrid retrieval**, not vector similarity alone.
+
+Preferred retrieval signals:
+
+```text
+1. Exact project scope
+2. Exact symbol / function / file match
+3. Component / category metadata
+4. Keyword / full-text match
+5. Semantic similarity
+6. Wikilink / knowledge-graph proximity
+7. Review / finding / release relationship
+8. Recency and validation status
+```
+
+Relevant candidates should be reranked before entering the final AI context.
+
+## 23.2 Structured Knowledge Context
+
+The final context passed to an AI role should be structured conceptually like:
+
+```json
+{
+  "current_code": [],
+  "project_config": [],
+  "verified_knowledge": [],
+  "reinforced_knowledge": [],
+  "provisional_knowledge": [],
+  "requirements": [],
+  "decisions": [],
+  "previous_findings": [],
+  "resolutions": [],
+  "conflicts": []
+}
+```
+
+Do not present a random concatenation of Markdown files to the model.
+
+## 23.3 Retrieval Safety
+
+By default:
+
+- exclude `DISABLED` knowledge,
+- do not treat `CONFLICTED` knowledge as truth,
+- strongly down-rank `NEEDS_REVALIDATION`,
+- identify `PROVISIONAL` knowledge explicitly,
+- preserve source/evidence references,
+- never let retrieved knowledge override contradictory current source code.
 
 ---
 
@@ -1988,7 +2097,7 @@ Verify Again
 Accept
 Reject
 Mark Intentional
-Save Lesson
+Mark as Solved
 ```
 
 Finding decision states:
@@ -1999,9 +2108,31 @@ ACCEPTED
 REJECTED
 INTENTIONAL
 NEEDS_MORE_EVIDENCE
+SOLVED
 ```
 
-Rejecting a finding should allow an engineer explanation.
+These actions are not only workflow states. They are **learning signals**
+for Evolving Project Intelligence.
+
+Examples:
+
+```text
+ACCEPTED
+May reinforce a confirmed bug pattern or risky component pattern.
+
+REJECTED
+Triggers investigation into why the candidate was wrong.
+A rejection must NOT automatically become a project fact.
+
+INTENTIONAL
+May generate or reinforce DESIGN_INTENT knowledge.
+
+SOLVED
+Triggers fix verification and may generate a RESOLUTION_PATTERN.
+```
+
+Rejecting a finding may allow an optional engineer explanation, but normal
+learning must not depend on the engineer manually writing a lesson.
 
 Example:
 
@@ -2012,12 +2143,19 @@ Potential race condition on measurement_buffer.
 Engineer:
 Reject.
 
-Reason:
-Only measurement_task writes the buffer.
-MQTT receives a copied snapshot through a queue.
+FirmSight:
+Re-investigate current source to determine why the candidate was wrong.
+
+Possible learned result:
+measurement_task is the only mutable owner and mqtt_task receives
+a queue copy.
+
+If evidence is insufficient:
+store the rejection history, but do not create unsupported knowledge.
 ```
 
-That explanation may become a candidate Engineering Memory.
+After meaningful finding decisions, FirmSight should enqueue incremental
+Project Intelligence synthesis and verification.
 
 ---
 
@@ -2034,7 +2172,7 @@ Chat context may include:
 - selected function,
 - selected finding,
 - project index,
-- Engineering Memory,
+- Project Intelligence,
 - `firmware.ai.yaml`,
 - conversation state.
 
@@ -2069,104 +2207,342 @@ AI must be able to re-analyze based on engineer feedback.
 
 ---
 
-# 28. Engineering Memory
+# 28. Evolving Project Intelligence
 
-FirmSight must maintain persistent **Engineering Memory**.
+The user-facing evolution of Engineering Memory is called
+**Project Intelligence**.
 
-This is different from conversation history.
+Project Intelligence is not chat history and is not a manual notebook.
 
 Purpose:
 
-> Learn from engineering decisions and reduce repeated false positives.
+> Allow FirmSight to progressively understand how a specific firmware
+> project is designed, reduce repeated false positives, recognize deviations
+> from established architecture, and improve future review context.
 
-Memory types:
+Project Intelligence should evolve automatically from:
+
+- completed AI reviews,
+- Investigator and Verifier evidence,
+- accepted findings,
+- rejected findings,
+- intentional findings,
+- solved findings,
+- verified source-code changes,
+- repeated architecture observations,
+- recurring bug patterns,
+- resolution patterns,
+- meaningful project-aware AI Chat interactions,
+- engineer corrections,
+- `firmware.ai.yaml`,
+- and Obsidian-compatible knowledge documents.
+
+Automatic learning is the default.
+
+The user does **not** need to manually teach every lesson to FirmSight.
+
+However, automatically learned knowledge must remain evidence-backed,
+versioned, inspectable, and revalidatable.
+
+## 28.1 Project Intelligence Types
+
+Support at least:
 
 ```text
-ENGINEERING_FACT
+PROJECT_FACT
+ARCHITECTURE_KNOWLEDGE
 DESIGN_INTENT
-LESSON_LEARNED
-REJECTED_FINDING
-ACCEPTED_FINDING
-ENGINEERING_PATTERN
+FALSE_POSITIVE_KNOWLEDGE
+CONFIRMED_BUG_PATTERN
+RESOLUTION_PATTERN
+RECURRING_PATTERN
 ```
+
+Examples:
+
+```text
+PROJECT_FACT
+config_task is the only current writer of the configuration NVS namespace.
+
+ARCHITECTURE_KNOWLEDGE
+measurement_task owns mutable measurement_state and mqtt_task consumes
+copied snapshots through measurement_queue.
+
+DESIGN_INTENT
+A successful OTA installation intentionally restarts the device.
+
+FALSE_POSITIVE_KNOWLEDGE
+Do not infer a race condition on measurement_state solely from MQTT reads;
+the MQTT path consumes a copied queue payload.
+
+CONFIRMED_BUG_PATTERN
+Cleanup paths have repeatedly caused resource ownership defects.
+
+RESOLUTION_PATTERN
+OTA resource cleanup is now centralized through a common cleanup path.
+
+RECURRING_PATTERN
+Networking lifecycle issues repeatedly appear around reconnect transitions.
+```
+
+## 28.2 Project Intelligence Is Not Absolute Truth
+
+Project Intelligence is context with provenance, not immutable truth.
+
+Current source evidence always has higher authority.
+
+If current code contradicts stored knowledge, FirmSight must surface the
+conflict and revalidate the knowledge instead of suppressing a finding.
 
 ---
 
-# 29. Engineering Memory Example
+# 29. Project Intelligence Data Model
+
+A Project Intelligence item should conceptually contain:
 
 ```json
 {
-  "id": "MEM-103",
-  "type": "ENGINEERING_FACT",
+  "id": "MEM-018",
+  "project_id": "touchsense",
 
-  "project_id": "ground-checker",
+  "type": "ARCHITECTURE_KNOWLEDGE",
 
-  "statement": "ADS1115 is exclusively accessed by measurement_task.",
+  "title": "Measurement state uses single-writer ownership",
+
+  "statement": "measurement_task owns mutable measurement_state while mqtt_task consumes copied snapshots from measurement_queue.",
+
+  "status": "REINFORCED",
+  "confidence": 0.94,
+  "observation_count": 3,
 
   "scope": {
-    "type": "PROJECT",
-    "component": "measurement"
-  },
-
-  "evidence": {
+    "component": "measurement",
     "symbols": [
       "measurement_task",
-      "ads1115_read"
+      "measurement_state",
+      "measurement_queue",
+      "mqtt_task"
+    ],
+    "files": [
+      "src/measurement.cpp",
+      "src/mqtt.cpp"
     ]
   },
 
-  "source": {
-    "type": "ENGINEER_CONFIRMED",
-    "finding_id": "FS-120"
-  },
+  "evidence": [
+    {
+      "type": "SOURCE",
+      "file": "src/measurement.cpp",
+      "symbol": "measurement_task",
+      "commit": "84a91ce"
+    },
+    {
+      "type": "FINDING_DECISION",
+      "finding_id": "FS-104",
+      "decision": "REJECTED"
+    },
+    {
+      "type": "REVIEW",
+      "review_id": "REVIEW-018"
+    }
+  ],
 
-  "status": "ACTIVE"
+  "first_observed_commit": "a317df2",
+  "last_validated_commit": "84a91ce",
+
+  "first_observed_at": "2026-09-12T10:21:00Z",
+  "last_observed_at": "2026-09-15T14:10:00Z",
+
+  "created_by": "MEMORY_SYNTHESIZER"
 }
 ```
 
----
+Adapt this schema to the existing application rather than duplicating
+equivalent fields.
 
-# 30. Memory Approval
+Every knowledge item must preserve:
 
-AI must not silently create permanent Engineering Memory.
+- project scope,
+- type,
+- lifecycle status,
+- confidence,
+- observation count,
+- evidence,
+- relevant symbols/files/components,
+- originating review/finding where applicable,
+- commit/version provenance where available,
+- timestamps.
 
-Correct flow:
-
-```text
-Review Conversation
-       │
-       ▼
-Potential Lesson Detected
-       │
-       ▼
-AI Proposes Lesson
-       │
-       ├── Save
-       ├── Edit
-       └── Ignore
-```
-
-Example:
-
-```text
-Suggested Lesson Learned
-
-sensor_event_callback executes exclusively
-from sensor_task context.
-
-Concurrent-access warnings involving this callback
-must therefore consider single-task execution.
-
-[Save Lesson]
-[Edit]
-[Ignore]
-```
-
-Engineer approval is required before persistent memory is created.
+Do not store unsupported generic AI prose as Project Intelligence.
 
 ---
 
-# 31. Memory Scope
+# 30. Automatic Learning Pipeline
+
+FirmSight must not require manual `Save Lesson` approval for normal learning.
+
+Automatically learned knowledge may be persisted after passing the
+Memory Verifier, but its lifecycle status must reflect evidence strength.
+
+Required pipeline:
+
+```text
+Review / Finding Decision / Verified Fix
+                │
+                ▼
+        Memory Synthesizer
+                │
+                ▼
+        Candidate Knowledge
+                │
+                ▼
+          Memory Verifier
+                │
+       ┌────────┼─────────┐
+       ▼        ▼         ▼
+     Create  Reinforce  Reject / Conflict
+       │        │
+       └────────┼─────────┘
+                ▼
+        Project Intelligence
+                │
+                ▼
+      Knowledge Base / RAG Index
+```
+
+## 30.1 Memory Synthesizer
+
+The Memory Synthesizer asks:
+
+> What did FirmSight learn from this event that could improve future
+> analysis of this project?
+
+Inputs may include:
+
+- review findings,
+- verifier results,
+- source evidence,
+- finding decisions,
+- solved finding / fix evidence,
+- related AI Chat context,
+- related existing knowledge,
+- current commit,
+- architecture relationships.
+
+It must emit schema-validated candidate knowledge.
+
+## 30.2 Memory Verifier
+
+The Memory Verifier must:
+
+- inspect current source evidence,
+- inspect relevant project-index relationships,
+- compare candidate knowledge with existing knowledge,
+- detect duplicates,
+- detect contradictions,
+- decide create / reinforce / supersede / conflict / reject,
+- determine lifecycle state,
+- assign confidence based on evidence,
+- preserve provenance.
+
+Weak or unsupported knowledge must be rejected.
+
+## 30.3 Engineer Control
+
+Automatic evolution is the default, but engineers retain control.
+
+The UI must allow:
+
+```text
+View Evidence
+Ask AI
+Revalidate
+Correct
+Disable
+```
+
+A manually corrected item should record:
+
+```text
+source_type: ENGINEER_CORRECTED
+```
+
+Engineer correction has high trust, but current source code may still
+invalidate it later if the implementation changes.
+
+---
+
+# 31. Project Intelligence Lifecycle and Scope
+
+## 31.1 Lifecycle States
+
+Support:
+
+```text
+PROVISIONAL
+REINFORCED
+VERIFIED
+NEEDS_REVALIDATION
+CONFLICTED
+SUPERSEDED
+DISABLED
+```
+
+Meanings:
+
+```text
+PROVISIONAL
+Observed once with reasonable evidence.
+
+REINFORCED
+Observed consistently across multiple reviews, commits, findings,
+or source paths.
+
+VERIFIED
+Strong current evidence supports the knowledge. Verification may
+come from deterministic source relationships, repeated evidence,
+engineer-confirmed behavior, or verified resolution evidence.
+
+NEEDS_REVALIDATION
+Relevant source or relationships changed.
+
+CONFLICTED
+Current source evidence directly contradicts the knowledge.
+
+SUPERSEDED
+A newer item replaces this knowledge.
+
+DISABLED
+Excluded from normal retrieval by an engineer.
+```
+
+## 31.2 Confidence
+
+Each item should track confidence.
+
+Confidence is evidence strength, not truth.
+
+Confidence should evolve from deterministic signals where possible.
+
+Increase confidence when:
+
+- repeated current source evidence supports the statement,
+- independent reviews reproduce the same relationship,
+- engineer decisions support the conclusion,
+- a verified fix confirms the resolution,
+- multiple related observations agree.
+
+Decrease confidence or invalidate when:
+
+- relevant symbols change,
+- ownership/call relationships change,
+- current source contradicts the statement,
+- evidence disappears,
+- the knowledge is stale relative to the active commit.
+
+Do not apply arbitrary random confidence deltas.
+
+## 31.3 Scope
 
 Supported scopes:
 
@@ -2179,7 +2555,7 @@ Framework
 Organization
 ```
 
-V1 should support at least:
+Initial implementation should focus on:
 
 ```text
 Symbol
@@ -2187,18 +2563,22 @@ Component
 Project
 ```
 
+Project-scoped intelligence is the priority.
+
+Framework and organization-wide knowledge may be added later.
+
 ---
 
-# 32. Memory Revalidation
+# 32. Project Intelligence Revalidation
 
-Engineering Memory must not be permanently trusted.
+Project Intelligence must not be permanently trusted.
 
-Source code changes.
+Source code evolves.
 
-Example memory:
+Example knowledge:
 
 ```text
-ADS1115 is only accessed by measurement_task.
+ADS1115 is exclusively accessed by measurement_task.
 ```
 
 Later code adds:
@@ -2209,34 +2589,707 @@ calibration_task
 ads1115_read()
 ```
 
-FirmSight must detect conflict.
+FirmSight must detect the change and re-evaluate the knowledge.
 
 Example UI:
 
 ```text
-Memory Conflict
+Knowledge Conflict
 
-Existing memory:
+Previous project knowledge:
 ADS1115 is exclusively owned by measurement_task.
 
-Current code:
+Current source:
 calibration_task now calls ads1115_read().
 
-This memory may no longer be valid.
+Status:
+CONFLICTED
 
-[Review]
-[Update]
+[View Evidence]
+[Revalidate]
+[Ask AI]
 [Disable]
 ```
 
-Supported memory states:
+## 32.1 Revalidation Triggers
+
+Revalidation should be triggered by meaningful changes such as:
+
+- linked file changed,
+- linked symbol changed,
+- new caller/callee relationship,
+- ownership relationship changed,
+- relevant task/resource topology changed,
+- `firmware.ai.yaml` changed,
+- linked Obsidian knowledge document changed,
+- associated requirement/ADR changed,
+- commit/branch context changed materially.
+
+## 32.2 Invalidation Conditions
+
+Knowledge documents may explicitly store invalidation conditions.
+
+Example:
 
 ```text
-ACTIVE
-NEEDS_REVALIDATION
-SUPERSEDED
-DISABLED
+Revalidate if:
+
+- ads1115_read() gains a new caller
+- measurement_task no longer owns the ADC state
+- another task obtains mutable access
 ```
+
+Where possible, FirmSight should translate invalidation conditions into
+deterministic index checks.
+
+## 32.3 Current Source Wins
+
+Never suppress a candidate finding solely because stored Project Intelligence
+says the previous architecture was safe.
+
+If the current source conflicts with old knowledge:
+
+```text
+Current source evidence wins.
+Stored knowledge is revalidated or marked conflicted.
+Analysis continues using current evidence.
+```
+
+---
+
+# 32A. Knowledge Base and Obsidian Vault
+
+FirmSight should maintain an **Obsidian-compatible Markdown knowledge base**
+for each project.
+
+The vault is the human-readable and portable representation of Project
+Intelligence, architecture knowledge, requirements, decisions, findings,
+resolutions, reviews, and releases.
+
+Obsidian is not required as an application runtime.
+
+An Obsidian vault is fundamentally a directory of Markdown files, so
+FirmSight should operate on a configured Markdown knowledge directory and
+keep it Obsidian-compatible.
+
+Recommended project vault structure:
+
+```text
+FirmSight-Vault/
+└── Projects/
+    └── <ProjectName>/
+        ├── 00-Project/
+        │   ├── Project.md
+        │   └── Firmware-Context.md
+        │
+        ├── 01-Architecture/
+        │   ├── System-Overview.md
+        │   ├── Task-Architecture.md
+        │   ├── MQTT.md
+        │   ├── OTA.md
+        │   └── Resource-Ownership.md
+        │
+        ├── 02-Requirements/
+        │   ├── REQ-001.md
+        │   └── ...
+        │
+        ├── 03-Decisions/
+        │   ├── ADR-001.md
+        │   └── ...
+        │
+        ├── 04-Knowledge/
+        │   ├── Facts/
+        │   ├── Design-Intent/
+        │   ├── Architecture/
+        │   ├── False-Positives/
+        │   ├── Bug-Patterns/
+        │   └── Resolution-Patterns/
+        │
+        ├── 05-Reviews/
+        │   └── 2026/
+        │       ├── Review-001.md
+        │       └── ...
+        │
+        ├── 06-Findings/
+        │   ├── FS-001.md
+        │   └── ...
+        │
+        ├── 07-Resolutions/
+        │   ├── RES-001.md
+        │   └── ...
+        │
+        ├── 08-Releases/
+        │   ├── v1.4.0.md
+        │   └── ...
+        │
+        └── 09-Journal/
+            ├── 2026-09.md
+            └── ...
+```
+
+Do not require every folder to contain data.
+
+Only create meaningful documents.
+
+---
+
+# 32B. Knowledge Document Contract
+
+Project Intelligence Markdown must use machine-readable YAML frontmatter.
+
+Example:
+
+```markdown
+---
+id: MEM-018
+type: architecture_knowledge
+project: touchsense
+
+status: reinforced
+confidence: 0.94
+observation_count: 3
+
+scope:
+  component: measurement
+
+symbols:
+  - measurement_task
+  - measurement_state
+  - measurement_queue
+  - mqtt_task
+
+files:
+  - src/measurement.cpp
+  - src/mqtt.cpp
+
+source:
+  - review: REVIEW-018
+  - finding: FS-104
+
+first_observed_commit: a317df2
+last_validated_commit: 84a91ce
+
+created_at: 2026-09-12T10:21:00Z
+updated_at: 2026-09-15T14:10:00Z
+
+tags:
+  - firmsight
+  - ownership
+  - concurrency
+  - measurement
+---
+
+# Measurement State Ownership
+
+## Knowledge
+
+`measurement_task` is the single writer of `measurement_state`.
+
+`mqtt_task` consumes a copied snapshot through
+`measurement_queue`.
+
+## Evidence
+
+- [[Review-018]]
+- [[FS-104]]
+- `src/measurement.cpp`
+- `src/mqtt.cpp`
+
+## Why This Matters
+
+This ownership model prevents the previous suspected direct shared-state
+race under the current implementation.
+
+## Invalidation Conditions
+
+Revalidate if:
+
+- another task writes `measurement_state`
+- another task gets mutable access to the state
+- `measurement_queue` is removed
+- ownership semantics change
+
+## Related
+
+- [[Task-Architecture]]
+- [[Resource-Ownership]]
+- [[FS-104]]
+```
+
+Required frontmatter for RAG-eligible knowledge should include when available:
+
+- stable document ID,
+- project,
+- knowledge type,
+- lifecycle status,
+- confidence,
+- symbols,
+- files,
+- component/category,
+- source review/finding/resolution,
+- commit provenance,
+- timestamps,
+- tags.
+
+Do not use Markdown title or prose alone as machine identity.
+
+### 32B.1 Document Interconnection Requirement
+
+Every knowledge document in the vault **must** be interconnected with other documents via Obsidian `[[wikilinks]]`. Isolated documents are not allowed.
+
+Each document must contain:
+
+1. **At least one outgoing wikilink** to a related knowledge document, finding, review, or symbol page.
+2. **A `## Related` section** listing all related documents using `[[wikilink]]` syntax.
+3. **Bidirectional links** where possible — if document A links to document B, document B should link back to document A.
+
+Example interconnection pattern:
+
+```markdown
+## Related
+
+- [[MEM-018]] — Measurement state ownership
+- [[FS-104]] — Rejected race condition finding
+- [[Review-018]] — Review that produced this knowledge
+- [[Task-Architecture]] — Related architecture document
+```
+
+The vault must form a **connected knowledge graph**, not a collection of isolated files. When creating or updating a document, the author must identify and link to at least one related document.
+
+---
+
+# 32C. Knowledge Storage Authority
+
+FirmSight must distinguish operational state from portable knowledge.
+
+```text
+Database
+    ↓
+workflow state
+relationships
+confidence
+review/finding status
+document metadata
+RAG index metadata
+
+Markdown Vault
+    ↓
+human-readable knowledge
+portable engineering documentation
+Obsidian wikilinks
+evidence summaries
+architecture / ADR / review documents
+```
+
+The database remains authoritative for transactional application state.
+
+The Markdown vault is the persistent human-readable knowledge representation
+and a primary RAG corpus.
+
+The two layers must share stable IDs.
+
+Do not rely on filenames alone for synchronization.
+
+If Markdown is edited externally, FirmSight should detect the change,
+parse frontmatter, validate it, update the knowledge record safely, and
+re-index the affected document.
+
+Externally edited knowledge should record provenance such as:
+
+```text
+ENGINEER_EDITED
+```
+
+---
+
+# 32D. RAG Indexing Pipeline
+
+The Knowledge Base must be automatically indexed for retrieval.
+
+Preferred pipeline:
+
+```text
+Markdown / Knowledge Change
+          │
+          ▼
+      Parse Frontmatter
+          │
+          ▼
+      Validate Metadata
+          │
+          ▼
+      Split by Semantic Heading
+          │
+          ▼
+       Create Chunks
+          │
+          ├── full-text index
+          ├── semantic/vector index
+          ├── symbol index
+          ├── metadata index
+          └── wikilink graph
+          │
+          ▼
+       RAG Ready
+```
+
+Chunking rules:
+
+- prefer heading/section boundaries,
+- keep evidence and claim context together,
+- attach document metadata to every chunk,
+- preserve project/document IDs,
+- preserve heading path,
+- do not mix unrelated projects,
+- do not create tiny meaningless chunks solely to maximize count.
+
+Every chunk should retain enough metadata to explain where retrieved
+knowledge came from.
+
+---
+
+# 32E. Hybrid RAG Retrieval
+
+FirmSight must not rely solely on embeddings.
+
+Preferred retrieval:
+
+```text
+AI Task / Query
+      │
+      ▼
+  Query Builder
+      │
+      ├── project filter
+      ├── exact symbol match
+      ├── file/function match
+      ├── component/category match
+      ├── keyword / full-text search
+      ├── semantic similarity
+      ├── wikilink graph proximity
+      └── review/finding relationships
+              │
+              ▼
+           Reranker
+              │
+              ▼
+       Knowledge Context
+```
+
+Use exact engineering identifiers as strong retrieval signals.
+
+Examples:
+
+```text
+measurement_state
+ota_install
+mqtt_event_handler
+FS-104
+REQ-014
+```
+
+must not be treated as generic semantic prose.
+
+## 32E.1 Retrieval Weighting
+
+Conceptually prefer:
+
+```text
+Current Source Evidence            highest authority
+
+Engineer-confirmed / corrected
+knowledge                          very high
+
+VERIFIED Project Intelligence      high
+
+REINFORCED Project Intelligence    high-medium
+
+firmware.ai.yaml requirements      medium-high
+
+PROVISIONAL Project Intelligence   medium-low
+
+Historical reviews / journal       supporting evidence
+
+AI inference                       lowest authority
+```
+
+These are conceptual trust tiers.
+
+Do not blindly hard-code a universal numeric score where evidence semantics
+require deterministic handling.
+
+---
+
+# 32F. RAG Status and Freshness Rules
+
+RAG retrieval must respect knowledge lifecycle.
+
+Default behavior:
+
+```text
+VERIFIED
+Eligible and strongly preferred when relevant.
+
+REINFORCED
+Eligible with clear provenance.
+
+PROVISIONAL
+Eligible as tentative context and must be labeled as such.
+
+NEEDS_REVALIDATION
+Down-rank and surface freshness warning.
+
+CONFLICTED
+Do not use as authoritative knowledge.
+May be retrieved only to explain the conflict/history.
+
+SUPERSEDED
+Do not use as current truth.
+
+DISABLED
+Exclude from normal retrieval.
+```
+
+The active source tree and current commit must always be considered fresher
+than historical Markdown knowledge.
+
+---
+
+# 32G. Knowledge Graph via Obsidian Wikilinks
+
+Obsidian `[[wikilinks]]` may be used as lightweight graph relations.
+
+Example:
+
+```text
+[[measurement_task]]
+      │
+      ├── owns
+      ▼
+[[measurement_state]]
+      │
+      └── copied via
+            ▼
+[[measurement_queue]]
+            │
+            ▼
+       [[mqtt_task]]
+```
+
+Historical relation example:
+
+```text
+[[FS-104]]
+    │
+    └── led to
+         ▼
+[[MEM-018]]
+    │
+    └── reinforced by
+         ▼
+[[Review-021]]
+```
+
+Do not require a graph database in the initial implementation.
+
+Start with parsed wikilinks / stable IDs and relationship tables.
+
+A graph database may be added later only if retrieval quality or scale
+justifies it.
+
+---
+
+# 32H. Automatic Knowledge Evolution Events
+
+Knowledge evolution should be event-driven and incremental.
+
+Relevant triggers:
+
+```text
+Review Completed
+Finding Accepted
+Finding Rejected
+Finding Marked Intentional
+Finding Solved
+Fix Verified
+Source Index Updated
+Git Commit Changed
+firmware.ai.yaml Changed
+Knowledge Markdown Changed
+ADR / Requirement Changed
+```
+
+Example:
+
+```text
+Finding Rejected
+      ↓
+Re-investigate Reason
+      ↓
+Memory Synthesizer
+      ↓
+Memory Verifier
+      ↓
+Create / Reinforce / Ignore
+      ↓
+Write / Update Markdown
+      ↓
+Re-index Changed Document
+```
+
+Do not regenerate or re-embed the entire vault after every event.
+
+Use incremental indexing based on document/file hash and stable IDs.
+
+---
+
+# 32I. Project Intelligence UI
+
+The old manual-memory concept should evolve into a Project Intelligence view.
+
+Recommended heading:
+
+```text
+PROJECT INTELLIGENCE
+
+What FirmSight has learned about this project.
+```
+
+Useful summary states:
+
+```text
+Learned
+Reinforced
+Verified
+Needs Revalidation
+Conflicted
+```
+
+Useful sections:
+
+```text
+Recently Learned
+Verified Project Knowledge
+Architecture Knowledge
+False Positive Knowledge
+Recurring Bug Patterns
+Resolution Patterns
+Needs Revalidation
+Knowledge Conflicts
+```
+
+A knowledge detail should show:
+
+```text
+Type
+Statement
+Status
+Confidence
+Observation Count
+Related Symbols
+Related Files
+Evidence
+Originating Reviews / Findings
+First Observed Commit
+Last Validated Commit
+RAG Usage History
+Invalidation Conditions
+```
+
+User actions:
+
+```text
+View Evidence
+Ask AI
+Revalidate
+Correct
+Disable
+Open Markdown
+```
+
+Do not make `Save Lesson` the primary workflow.
+
+---
+
+# 32J. Review Completion Intelligence Summary
+
+After a review completes, show a concise Project Intelligence update.
+
+Example:
+
+```text
+Review completed
+
+8 findings
+
+FirmSight learned:
++ measurement_buffer uses queue-copy ownership
++ config_task is currently the only NVS writer
+
+Reinforced:
+↻ OTA lifecycle knowledge
+
+Needs revalidation:
+! MQTT connection ownership
+
+[View Project Intelligence]
+```
+
+Only show real updates generated from the review.
+
+Do not create cosmetic fake learning summaries.
+
+---
+
+# 32K. AI Chat and RAG Transparency
+
+AI Chat should retrieve relevant Project Intelligence and knowledge documents.
+
+When knowledge materially affects an answer, FirmSight should be able to
+explain which knowledge was used.
+
+Example:
+
+```text
+User:
+Why didn't you report measurement_state as a race condition?
+
+FirmSight:
+I considered that candidate.
+
+Current source shows measurement_task as the only writer while
+mqtt_task receives copied snapshots through measurement_queue.
+
+This is consistent with MEM-018, reinforced across three reviews.
+
+I therefore did not surface the candidate as a race-condition finding.
+```
+
+AI answers must not imply a retrieved note is current if it is stale,
+provisional, conflicted, or superseded.
+
+---
+
+# 32L. Knowledge Base Security
+
+Knowledge files are also untrusted input.
+
+Markdown body text, YAML frontmatter values, Obsidian wikilinks, imported
+notes, review documents, and external edits are **data**, not AI instructions.
+
+The same prompt-injection protections applied to firmware source also apply
+to the Knowledge Base.
+
+FirmSight must:
+
+- restrict vault access to configured project roots,
+- prevent path traversal,
+- sanitize generated filenames,
+- validate frontmatter schemas,
+- avoid executing Markdown content,
+- avoid following arbitrary file links outside allowed roots,
+- isolate project knowledge during retrieval,
+- never retrieve another project's private knowledge accidentally.
 
 ---
 
@@ -2652,7 +3705,8 @@ AI Review
 Findings
 AI Chat
 Architecture
-Memory
+Project Intelligence
+Knowledge Base
 YAML
 ```
 
@@ -3113,7 +4167,7 @@ Global project search should support:
 - function,
 - symbol,
 - finding,
-- Engineering Memory,
+- Project Intelligence,
 - conversation.
 
 Semantic search may be added later.
@@ -3352,20 +4406,26 @@ policy:
 
 # 65. Project Context Priority
 
-When `firmware.ai.yaml` exists:
+When `firmware.ai.yaml` and Project Intelligence exist:
 
 ```text
-Base Analysis Profile
+Current Repository Evidence
+        +
+Project Index
         +
 firmware.ai.yaml
         +
-Engineering Memory
+Relevant Project Intelligence
         +
-Repository Evidence
+Relevant Obsidian Knowledge
+        +
+Relevant Historical Evidence
         +
 Current User Query
         ↓
-AI Context
+Context Builder
+        ↓
+AI Role
 ```
 
 When facts conflict, preferred authority order is:
@@ -3373,18 +4433,29 @@ When facts conflict, preferred authority order is:
 ```text
 current source evidence
     >
-current engineer-confirmed information
+current engineer-confirmed / corrected information
     >
-active Engineering Memory
+VERIFIED Project Intelligence
+    >
+REINFORCED Project Intelligence
+    >
+current project requirements / ADRs
     >
 firmware.ai.yaml
+    >
+PROVISIONAL Project Intelligence
+    >
+historical review notes / journal
     >
 AI inference
 ```
 
+`NEEDS_REVALIDATION`, `CONFLICTED`, `SUPERSEDED`, and `DISABLED`
+knowledge must not silently influence analysis as current truth.
+
 Do not silently resolve meaningful conflicts.
 
-Surface them to the engineer.
+Surface them to the engineer and trigger revalidation when appropriate.
 
 ---
 
@@ -3409,14 +4480,28 @@ FindingDecision
 Conversation
 ConversationMessage
 
-EngineeringMemory
-MemoryEvidence
-MemoryScope
+ProjectIntelligence
+KnowledgeEvidence
+KnowledgeScope
+KnowledgeObservation
+KnowledgeRelation
+KnowledgeConflict
+
+KnowledgeDocument
+KnowledgeChunk
+KnowledgeIndexState
+KnowledgeLink
 
 AnalysisProfile
 
 YamlGeneration
 ```
+
+Existing `EngineeringMemory` tables may be migrated or evolved rather than
+discarded if they already contain production data.
+
+Stable IDs must connect database knowledge records with Markdown documents
+and RAG chunks.
 
 ---
 
@@ -3438,7 +4523,16 @@ Suggested endpoints:
 
 /projects/{id}/chat
 
-/projects/{id}/memories
+/projects/{id}/intelligence
+/projects/{id}/intelligence/{knowledge_id}
+/projects/{id}/intelligence/{knowledge_id}/revalidate
+/projects/{id}/intelligence/{knowledge_id}/disable
+
+/projects/{id}/knowledge
+/projects/{id}/knowledge/documents
+/projects/{id}/knowledge/documents/{document_id}
+/projects/{id}/knowledge/reindex
+/projects/{id}/knowledge/search
 
 /projects/{id}/yaml/generate
 /projects/{id}/yaml/validate
@@ -3448,6 +4542,9 @@ Suggested endpoints:
 ```
 
 Exact API design may evolve.
+
+Do not expose internal vector-store details as the public product API unless
+a real user-facing requirement needs them.
 
 ---
 
@@ -3522,7 +4619,7 @@ Nothing here.
 
 # 71. MVP Scope
 
-V1 must include:
+The current FirmSight baseline includes or targets:
 
 - project CRUD,
 - project empty state,
@@ -3535,15 +4632,32 @@ V1 must include:
 - Verifier/Skeptic,
 - structured findings,
 - finding detail,
-- accept/reject/intentional workflow,
+- accept/reject/intentional/solved workflow,
 - project-aware AI Chat,
-- Engineering Memory,
-- memory proposal and approval,
-- memory revalidation foundation,
 - `firmware.ai.yaml` Generator,
-- minimal dark Liquid Glass UI,
 - persistence,
-- basic review history.
+- review history.
+
+The next core intelligence milestone must include:
+
+- Project Intelligence data model,
+- automatic Memory Synthesizer,
+- Memory Verifier,
+- automatic learning from review/finding lifecycle,
+- knowledge reinforcement,
+- knowledge conflict detection,
+- source-change revalidation,
+- Obsidian-compatible Markdown knowledge vault,
+- frontmatter knowledge contract,
+- incremental knowledge sync,
+- hybrid RAG retrieval,
+- project/symbol/component metadata filtering,
+- RAG-aware Context Builder,
+- Project Intelligence UI,
+- knowledge provenance / evidence UI,
+- AI Chat transparency for retrieved knowledge.
+
+Do not require manual lesson approval as the primary learning mechanism.
 
 ---
 
@@ -3573,10 +4687,6 @@ Prepare architecture for future additions but do not block V1.
 
 ## Phase 1 — Full-Stack Foundation
 
-Implement a working web application, not backend-only infrastructure.
-
-Required:
-
 ```text
 Web App Shell
 Projects Page
@@ -3590,8 +4700,6 @@ Database
 OpenRouter Provider
 Basic Indexing
 ```
-
-The dashboard must exist in Phase 1.
 
 ## Phase 2 — AI Review
 
@@ -3623,18 +4731,44 @@ Selected Code Context
 Re-analysis
 ```
 
-## Phase 5 — Engineering Memory
+## Phase 5 — Evolving Project Intelligence
 
 ```text
-Memory Entity
-Memory Proposal
-Save / Edit / Disable
-Memory Retrieval
-Rejected-finding Memory
-Memory Revalidation
+Project Intelligence schema
+Memory Synthesizer
+Memory Verifier
+Automatic learning triggers
+Accept / Reject / Intentional / Solved learning signals
+Knowledge reinforcement
+Confidence / observation tracking
+Knowledge conflict detection
+Source-change revalidation
+Project Intelligence UI
 ```
 
-## Phase 6 — YAML Generator
+## Phase 6 — Knowledge Base & RAG
+
+```text
+Obsidian-compatible vault
+Markdown/frontmatter contract
+Knowledge document sync
+Incremental indexing
+Full-text retrieval
+Semantic/vector retrieval when available
+Symbol / metadata filters
+Wikilink relation index
+Reranking
+RAG-aware Context Builder
+AI Chat knowledge transparency
+```
+
+Start with the simplest retrieval implementation that satisfies quality
+requirements.
+
+Do not add a graph database or complex vector infrastructure before there
+is evidence it is needed.
+
+## Phase 7 — YAML Generator
 
 ```text
 Description Input
@@ -3646,7 +4780,7 @@ Editor
 Copy / Export
 ```
 
-## Phase 7 — Refinement
+## Phase 8 — Refinement
 
 ```text
 Liquid Glass Polish
@@ -3656,6 +4790,8 @@ Search
 Performance
 Review History
 Git Metadata
+Retrieval Quality Metrics
+Knowledge Revalidation UX
 ```
 
 ---
@@ -3694,13 +4830,13 @@ FirmSight must pass this scenario:
     run AI Review,
     inspect Findings,
     use AI Chat,
-    manage Engineering Memory,
+    manage Project Intelligence,
     generate firmware.ai.yaml.
 ```
 
 ---
 
-# 75. Core AI Acceptance Scenario
+# 75. Core AI and Evolving Intelligence Acceptance Scenario
 
 ```text
 1. User imports an ESP-IDF project.
@@ -3719,7 +4855,8 @@ FirmSight must pass this scenario:
    readers,
    task contexts,
    synchronization,
-   project memory.
+   relevant Project Intelligence,
+   relevant knowledge documents.
 
 6. Finding appears as:
 
@@ -3733,26 +4870,45 @@ FirmSight must pass this scenario:
    assumptions,
    verification result.
 
-8. Engineer says:
+8. Engineer rejects the finding.
 
-   "This is not a race condition because only
-   measurement_task writes it. MQTT gets a queue copy."
+9. FirmSight re-investigates the current source.
 
-9. FirmSight re-analyzes source.
+10. FirmSight determines:
 
-10. AI agrees and rejects the finding.
+    measurement_task is the only mutable writer and
+    mqtt_task consumes copied queue snapshots.
 
-11. FirmSight proposes a lesson:
+11. Memory Synthesizer creates a candidate:
 
-    "MQTT accesses a copied measurement snapshot
-    rather than shared measurement_state."
+    ARCHITECTURE_KNOWLEDGE
+    "measurement_state uses single-writer ownership."
 
-12. Engineer approves the memory.
+12. Memory Verifier validates the candidate against current source.
 
-13. The next review retrieves that memory.
+13. FirmSight persists it as PROVISIONAL or REINFORCED,
+    depending on available evidence.
 
-14. FirmSight avoids repeating the same false positive
-    unless current code contradicts the memory.
+14. FirmSight writes/updates the corresponding Markdown knowledge
+    document in the configured project vault.
+
+15. The knowledge document is incrementally indexed into RAG.
+
+16. On the next review, a similar candidate is investigated.
+
+17. Relevant memory is retrieved by project + symbol + category.
+
+18. Verifier checks the current source again.
+
+19. If the architecture is unchanged, the repeated false positive
+    is suppressed before becoming a final finding.
+
+20. If the source has changed and the old knowledge is no longer true,
+    the knowledge becomes NEEDS_REVALIDATION or CONFLICTED and the
+    candidate is not suppressed.
+
+21. AI Chat can explain which knowledge affected the decision and
+    show its evidence/provenance.
 ```
 
 ---
@@ -3797,8 +4953,21 @@ Unit tests should cover:
 - context retrieval,
 - finding parsing,
 - finding decisions,
-- Engineering Memory validity,
-- memory revalidation,
+- Project Intelligence lifecycle,
+- Memory Synthesizer output validation,
+- Memory Verifier decisions,
+- confidence / observation update rules,
+- duplicate knowledge reinforcement,
+- knowledge conflict detection,
+- source-change revalidation,
+- Markdown frontmatter validation,
+- Markdown sync,
+- RAG chunk generation,
+- project isolation,
+- metadata filtering,
+- full-text retrieval,
+- semantic retrieval when enabled,
+- reranking,
 - YAML validation,
 - AI response repair.
 
@@ -3809,9 +4978,18 @@ project import → indexing → project UI
 
 candidate → verifier → finding
 
-finding reject → memory proposal
+finding reject → re-investigation → candidate knowledge
+→ memory verifier → Project Intelligence
 
-memory → subsequent analysis
+Project Intelligence → Markdown document → RAG index
+→ next review retrieval
+
+existing knowledge + repeated evidence → reinforcement
+without duplicate record
+
+source change → knowledge revalidation → conflict
+
+external Markdown edit → parse → validate → re-index
 
 description → YAML generation
 ```
@@ -3828,21 +5006,46 @@ and:
 code that looks suspicious but is actually valid
 ```
 
-Examples:
+Required evolving-intelligence scenarios:
 
-- real mutex leak,
-- valid exclusive resource ownership,
-- queue misuse,
-- valid queue usage,
-- ISR API misuse,
-- valid ISR implementation,
-- intentional reboot,
-- fake race-condition pattern,
-- actual race condition.
+```text
+A. Rejected False Positive
+A rejected race candidate produces architecture knowledge only when
+current source evidence supports the explanation.
+
+B. Weak Rejection
+A rejected finding with no reliable explanation does not become a
+project fact.
+
+C. Accepted Bug
+Repeated accepted issues may create/reinforce a confirmed bug pattern.
+
+D. Solved Finding
+A verified fix may create a resolution pattern.
+
+E. Memory Conflict
+Old exclusive-ownership knowledge becomes conflicted after a new caller
+is introduced.
+
+F. Duplicate Learning
+Repeated observations reinforce one stable knowledge item rather than
+creating many duplicate records.
+
+G. RAG Isolation
+Knowledge from Project A must never be retrieved into Project B.
+
+H. Stale Knowledge
+NEEDS_REVALIDATION knowledge cannot silently override current code.
+
+I. Prompt Injection
+Instructions embedded in Markdown knowledge or source comments must be
+treated as data and must not alter system instructions.
+```
 
 False-positive regression tests are first-class tests.
 
-FirmSight must be tested for its ability to correctly **not** flag valid code.
+FirmSight must be tested for its ability to correctly **not** flag valid code
+and for its ability to invalidate knowledge when the code evolves.
 
 ---
 
@@ -3875,29 +5078,41 @@ Any coding agent working on FirmSight must:
 3. Preserve current working functionality.
 4. Follow the product principles above.
 5. Never simplify away Investigator vs Verifier.
-6. Never silently create Engineering Memory.
-7. Never silently treat an AI finding as truth.
-8. Keep AI provider integration abstracted.
-9. Keep prompts versioned.
-10. Keep structured outputs schema validated.
-11. Treat imported firmware source as untrusted input.
-12. Prefer deterministic code for deterministic tasks.
-13. Use AI only where semantic reasoning adds value.
-14. Build frontend and backend together.
-15. Never consider a user-facing feature complete if it has no functional UI.
-16. Never create dummy projects in normal runtime.
-17. Show empty states when real data does not exist.
-18. Preserve the FirmSight visual identity.
-19. Avoid generic admin-dashboard styling.
-20. Prioritize a coherent end-to-end workflow over isolated infrastructure.
+6. Never silently treat an AI finding as truth.
+7. Automatically learned Project Intelligence must pass Memory Verifier.
+8. Do not require manual lesson approval for normal evolution.
+9. Preserve evidence and provenance for automatically learned knowledge.
+10. Current source code must override stale/conflicting stored knowledge.
+11. Keep AI provider integration abstracted.
+12. Keep prompts versioned.
+13. Keep structured outputs schema validated.
+14. Treat imported firmware source and knowledge Markdown as untrusted input.
+15. Prefer deterministic code for deterministic tasks.
+16. Use AI only where semantic reasoning adds value.
+17. Build frontend and backend together.
+18. Never consider a user-facing feature complete if it has no functional UI.
+19. Never create dummy projects or dummy intelligence in normal runtime.
+20. Show empty states when real data does not exist.
+21. Preserve the FirmSight visual identity.
+22. Avoid generic admin-dashboard styling.
+23. Prioritize coherent end-to-end workflows over isolated infrastructure.
+24. RAG retrieval must always be scoped to the active project.
+25. Do not send the entire vault or repository to the model unnecessarily.
+26. Do not use vector similarity as the only retrieval strategy.
+27. Do not introduce a graph database until simpler indexed relationships are insufficient.
+28. Knowledge sync must use stable IDs rather than filenames alone.
+29. External Markdown edits must be validated before affecting active knowledge.
+30. Knowledge lifecycle status must influence retrieval and AI trust.
 
 Before implementing a task, briefly determine:
 
 - which sections of this file apply,
 - which modules are affected,
 - whether the change impacts AI behavior,
-- whether the change impacts Engineering Memory,
-- whether the change impacts UI state.
+- whether the change impacts Project Intelligence,
+- whether the change impacts Knowledge Base / RAG,
+- whether the change impacts UI state,
+- whether a data migration is required.
 
 Then implement the task.
 
@@ -3926,7 +5141,10 @@ firmsight/
 │   ├── project-indexer/
 │   ├── context-builder/
 │   ├── analysis-engine/
-│   ├── memory-engine/
+│   ├── project-intelligence/
+│   ├── knowledge-base/
+│   ├── rag-indexer/
+│   ├── knowledge-retriever/
 │   └── ai-gateway/
 │
 ├── analysis/
@@ -3941,17 +5159,30 @@ firmsight/
 │   ├── investigator/
 │   ├── verifier/
 │   ├── chat/
-│   ├── memory/
+│   ├── memory-synthesizer/
+│   ├── memory-verifier/
+│   ├── knowledge-reranker/
 │   └── yaml-generator/
+│
+├── knowledge/
+│   ├── templates/
+│   ├── schemas/
+│   └── vault-adapters/
 │
 ├── docs/
 │
 ├── tests/
+│   ├── fixtures/
+│   ├── intelligence/
+│   └── rag/
 │
 └── AGENTS.md
 ```
 
 Exact folder structure may evolve as long as domain boundaries remain clear.
+
+Do not create separate services solely to match this example if the existing
+repository already has a clean equivalent architecture.
 
 ---
 
@@ -3997,7 +5228,35 @@ FirmSight provides:
 
 The long-term vision of FirmSight is:
 
-> A firmware intelligence platform that understands how embedded software behaves, remembers engineering decisions, learns from previous reviews, and helps teams prevent recurring firmware mistakes.
+> A firmware intelligence platform that understands how embedded software behaves,
+> learns continuously from reviews and verified engineering outcomes, maintains
+> a portable human-readable knowledge base, retrieves the right project knowledge
+> when needed, and helps teams prevent recurring firmware mistakes.
+
+FirmSight should become more accurate per project because its context becomes
+richer and more specific, not because stored AI output is treated as truth.
+
+The evolution loop is:
+
+```text
+Source Code
+    ↓
+Review
+    ↓
+Engineer / Verifier Outcome
+    ↓
+Project Intelligence
+    ↓
+Obsidian-compatible Knowledge Base
+    ↓
+Hybrid RAG
+    ↓
+Better Context
+    ↓
+Next Review
+    ↓
+Revalidation
+```
 
 Every implementation decision should reinforce:
 
@@ -4006,6 +5265,15 @@ Evidence
 Context
 Verification
 Interaction
+Evolution
+Knowledge
+Retrieval
 Memory
 Trust
 ```
+
+The engineer remains the final authority.
+
+Current source evidence remains the highest technical authority.
+
+---

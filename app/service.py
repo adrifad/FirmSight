@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import HTTPException, status
+
+from .i18n import message as _msg
+from .i18n import normalize_locale
 
 from . import intelligence_core as core
 from .repository import MemoryRepository
@@ -20,8 +24,16 @@ def _now() -> str:
 
 
 class MemoryService:
-    def __init__(self, repository: MemoryRepository) -> None:
+    def __init__(self, repository: MemoryRepository, language_resolver: Callable[[], str] | None = None) -> None:
         self.repository = repository
+        self.language_resolver = language_resolver
+
+    def _error(self, status_code: int, key: str, /, **params: object) -> HTTPException:
+        try:
+            locale = normalize_locale(self.language_resolver() if self.language_resolver else None)
+        except Exception:  # noqa: BLE001 - error rendering must never raise
+            locale = "en"
+        return HTTPException(status_code, _msg(key, locale, **params))
 
     @staticmethod
     def _memory_id() -> str:
@@ -53,7 +65,7 @@ class MemoryService:
     def approve(self, proposal_id: str, approval: MemoryApproval) -> MemoryRead:
         proposal = self.repository.get_proposal(proposal_id)
         if not proposal:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory proposal not found")
+            raise self._error(status.HTTP_404_NOT_FOUND, "error.proposal_not_found")
         now = _now()
         source = proposal["source"].copy()
         if approval.engineer_note:
@@ -120,22 +132,22 @@ class MemoryService:
 
     def update_proposal(self, proposal_id: str, update: MemoryProposalUpdate) -> ProposalRead:
         if not self.repository.get_proposal(proposal_id):
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory proposal not found")
+            raise self._error(status.HTTP_404_NOT_FOUND, "error.proposal_not_found")
         changes = update.model_dump(mode="json", exclude_unset=True)
         if not changes:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "At least one update is required")
+            raise self._error(status.HTTP_422_UNPROCESSABLE_CONTENT, "error.no_updates")
         self.repository.update_proposal(proposal_id, changes)
         return self._as_proposal(self.repository.get_proposal(proposal_id))
 
     def ignore_proposal(self, proposal_id: str) -> None:
         if not self.repository.get_proposal(proposal_id):
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory proposal not found")
+            raise self._error(status.HTTP_404_NOT_FOUND, "error.proposal_not_found")
         self.repository.delete_proposal(proposal_id)
 
     def get(self, memory_id: str) -> MemoryRead:
         record = self.repository.get_memory(memory_id)
         if not record:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Engineering memory not found")
+            raise self._error(status.HTTP_404_NOT_FOUND, "error.memory_not_found")
         return self._as_memory(record)
 
     def list(self, project_id: str, status_filter: MemoryStatus | None = None) -> list[MemoryRead]:
@@ -145,7 +157,7 @@ class MemoryService:
         self.get(memory_id)
         changes = update.model_dump(mode="json", exclude_unset=True)
         if not changes:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "At least one update is required")
+            raise self._error(status.HTTP_422_UNPROCESSABLE_CONTENT, "error.no_updates")
         changes["updated_at"] = _now()
         self.repository.update_memory(memory_id, changes)
         return self.get(memory_id)

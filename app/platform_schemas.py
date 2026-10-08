@@ -102,6 +102,65 @@ class SymbolRead(BaseModel):
     line: int
 
 
+class TopologySymbolRead(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    kind: str
+    file: str
+    line_start: int
+    line_end: int
+    signature: str = ""
+    component: str | None = None
+    source_hash: str
+    confidence: float = Field(ge=0, le=1)
+
+
+class TopologyRelationRead(BaseModel):
+    id: str
+    project_id: str
+    relation_kind: str
+    source_symbol_id: str | None = None
+    target_symbol_id: str | None = None
+    target_name: str | None = None
+    file: str
+    line: int
+    evidence_hash: str
+    confidence: float = Field(ge=0, le=1)
+    relation_state: str
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class AllocationEventRead(BaseModel):
+    id: str
+    project_id: str
+    symbol_id: str | None = None
+    variable: str | None = None
+    event_kind: str
+    allocator_or_releaser: str
+    file: str
+    line: int
+    evidence_hash: str
+    ownership_state: str
+    confidence: float = Field(ge=0, le=1)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class TopologyRead(BaseModel):
+    symbols: list[TopologySymbolRead] = Field(default_factory=list)
+    relations: list[TopologyRelationRead] = Field(default_factory=list)
+    allocations: list[AllocationEventRead] = Field(default_factory=list)
+    snapshot: dict[str, str] | None = None
+
+
+class TopologyPathRead(BaseModel):
+    nodes: list[TopologySymbolRead] = Field(default_factory=list)
+    relations: list[TopologyRelationRead] = Field(default_factory=list)
+    allocations: list[AllocationEventRead] = Field(default_factory=list)
+    truncated: bool = False
+    fingerprint: str = ""
+
+
 class IndexRead(BaseModel):
     project_id: str
     file_count: int
@@ -158,8 +217,17 @@ class StructuredOutputMode(StrEnum):
     JSON_SCHEMA = "JSON_SCHEMA"
 
 
+class StructuredFinalizationPolicy(StrEnum):
+    """Bounded structured-finalization recovery behavior for reasoning providers."""
+
+    AUTO = "AUTO"
+    ALWAYS = "ALWAYS"
+    NEVER = "NEVER"
+
+
 class ReasoningEffort(StrEnum):
     UNSPECIFIED = "UNSPECIFIED"
+    NONE = "NONE"
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
@@ -192,6 +260,10 @@ class ReviewDiagnosticRead(BaseModel):
     error_message: str | None = None
     content_state: str | None = None
     finish_reason: str | None = None
+    structured_mode: str | None = None
+    finalization_policy: str | None = None
+    finalization_recovery: bool = False
+    effective_max_tokens: int | None = None
     validation_category: str | None = None
     validation_fields: list[str] = Field(default_factory=list)
     retry_suppressed: bool = False
@@ -277,6 +349,8 @@ class FindingRead(BaseModel):
     recommendation: str
     verification: FindingVerification
     decision: FindingDecision
+    topology_path: list[dict[str, object]] = Field(default_factory=list)
+    lifetime_evidence: list[dict[str, object]] = Field(default_factory=list)
     decision_reason: str | None
     resolution: FindingResolution = FindingResolution.OPEN
     resolved_at: datetime | None = None
@@ -390,9 +464,11 @@ class AISettingsUpdate(BaseModel):
     provider: str = Field(min_length=1, max_length=80)
     endpoint: str = Field(min_length=8, max_length=1000)
     models: dict[str, str] = Field(min_length=1, max_length=10)
+    language: str | None = Field(default=None, min_length=2, max_length=8)
     review_context_chars: int | None = Field(default=None)
     structured_output_mode: StructuredOutputMode | None = None
     reasoning_effort: ReasoningEffort | None = None
+    structured_finalization_policy: StructuredFinalizationPolicy | None = None
     investigator_max_tokens: OutputBudget | None = None
     verifier_max_tokens: OutputBudget | None = None
     review_parallel_requests: int | None = Field(default=None, ge=1, le=3)
@@ -405,9 +481,11 @@ class AISettingsRead(BaseModel):
     api_key_masked: str | None
     api_key_environment: str
     models: dict[str, str]
+    language: str = "en"
     review_context_chars: int
     structured_output_mode: StructuredOutputMode = StructuredOutputMode.PROMPT_ONLY
     reasoning_effort: ReasoningEffort = ReasoningEffort.UNSPECIFIED
+    structured_finalization_policy: StructuredFinalizationPolicy = StructuredFinalizationPolicy.AUTO
     investigator_max_tokens: OutputBudget = 2000
     verifier_max_tokens: OutputBudget = 1200
     review_parallel_requests: int = 2

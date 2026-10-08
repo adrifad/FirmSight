@@ -2,6 +2,7 @@ import { X } from 'lucide-react'
 import type { Project } from '../api'
 import logoUrl from '../assets/firmsight-logo.png'
 import { DesktopNav, NavGroup, SettingsNavItem, type Page } from './navigation'
+import { ThemeToggle } from './ThemeToggle'
 
 export type { Page }
 export { DesktopNav }
@@ -20,6 +21,8 @@ export function AppSidebar({ page, active, open, onNavigate, onClose }: { page: 
       </nav>
       <div className="sidebar-footer">
         <SettingsNavItem page={page} onNavigate={onNavigate} />
+        {/* Rendered unconditionally (TASK-2026-0911): the theme toggle stays visible and clickable in every mode, including fullscreen. */}
+        <ThemeToggle />
       </div>
     </aside>
   </>

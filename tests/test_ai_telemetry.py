@@ -8,12 +8,43 @@ from pydantic import ValidationError
 from app.ai_provider import OpenAICompatibleProvider, ProviderEvent, TokenUsage, _completion_summary, _decode_completion_response, _validation_summary, structured_response
 from app.indexer import FirmwareIndexer
 from app.main import create_app
-from app.platform_schemas import FixVerificationResult, InvestigatorResult, ProjectCreate
+from app.platform_schemas import FindingCandidate, FixVerificationResult, InvestigatorResult, ProjectCreate
 from app.platform_repository import PlatformRepository
 from app.project_service import ProjectService
 from app.repository import MemoryRepository
 from app.review_service import ReviewService
 from app.service import MemoryService
+
+
+def test_review_candidate_deduplicates_near_identical_issue_at_same_location() -> None:
+    first = FindingCandidate.model_validate({
+        "title": "OTA mutex is not released when setup fails",
+        "classification": "PROBABLE_BUG",
+        "severity": "high",
+        "category": "CONCURRENCY",
+        "confidence": 0.86,
+        "location": {"file": "src/ota.cpp", "function": "ota_install", "line_start": 40, "line_end": 48},
+        "summary": "A failed OTA setup returns after the mutex has been acquired.",
+        "evidence": [{"description": "The error return occurs before xSemaphoreGive.", "file": "src/ota.cpp", "line": 45}],
+        "execution_path": ["ota_install", "xSemaphoreTake", "return"],
+        "runtime_scenario": "A failed setup leaves later OTA callers blocked on the mutex.",
+        "impact": "Subsequent OTA operations may stop progressing.",
+        "assumptions": [],
+        "recommendation": "Release the mutex on every error exit path.",
+    })
+    duplicate = FindingCandidate.model_validate({**first.model_dump(mode="json"),
+        "title": "OTA mutex remains locked on setup error path",
+        "summary": "When OTA setup fails, the acquired mutex is not released before returning.",
+        "location": {"file": "src/ota.cpp", "function": "ota_install", "line_start": 42, "line_end": 49},
+    })
+    distinct = FindingCandidate.model_validate({**first.model_dump(mode="json"),
+        "title": "OTA error result is ignored by the caller",
+        "summary": "The caller continues without handling the failed OTA setup result.",
+        "location": {"file": "src/ota.cpp", "function": "ota_install", "line_start": 40, "line_end": 48},
+    })
+
+    assert ReviewService._same_finding_candidate(first, duplicate)
+    assert not ReviewService._same_finding_candidate(first, distinct)
 
 
 def test_usage_is_extracted_from_json_and_reasoning_details() -> None:
@@ -306,3 +337,211 @@ def test_stale_running_review_is_marked_interrupted(tmp_path) -> None:
     assert review.validated_batches == 1
     assert review.unavailable_batches == 1
     assert "worker stopped" in (review.error or "")
+
+
+def test_provider_events_carry_structured_request_contract_metadata(monkeypatch) -> None:
+    class Response:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"choices":[{"finish_reason":"length","message":{"reasoning_content":"private chain"}}]}'
+
+    monkeypatch.setattr("app.ai_provider.urlopen", lambda *_args, **_kwargs: Response())
+    events: list[ProviderEvent] = []
+    provider = OpenAICompatibleProvider(
+        "secret-key",
+        "https://gateway.example/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        name="9router",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="LOW",
+        structured_finalization_policy="ALWAYS",
+    )
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)
+
+    prepared = [event for event in events if event.state == "REQUEST_PREPARED"]
+    assert prepared
+    initial = [event for event in prepared if not event.finalization_recovery]
+    assert initial
+    for event in initial:
+        assert event.structured_mode == "JSON_OBJECT"
+        assert event.finalization_policy == "ALWAYS"
+        assert event.finalization_recovery is False
+    # ALWAYS policy on a DeepSeek output-limit failure attempts the one
+    # bounded recovery; its contract metadata is asserted separately below.
+    recovery_prepared = [event for event in prepared if event.finalization_recovery]
+    assert recovery_prepared
+    for event in recovery_prepared:
+        assert event.structured_mode == "JSON_OBJECT"
+        assert event.finalization_policy == "ALWAYS"
+        assert event.operation.endswith(":finalization-retry")
+    exhausted = [event for event in events if event.error_kind == "OUTPUT_FINALIZATION_EXHAUSTED"]
+    assert len(exhausted) == 1
+    assert exhausted[0].finalization_recovery is True
+
+
+def test_finalization_recovery_events_are_marked_and_safe(monkeypatch) -> None:
+    bodies = [
+        json.dumps({"choices": [{"finish_reason": "length", "message": {"reasoning_content": "private chain"}}]}).encode(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Recovered final structured response."}'}}]}).encode(),
+    ]
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+        index = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            body = bodies[min(self.index, len(bodies) - 1)]
+            Response.index += 1
+            return body
+
+    monkeypatch.setattr("app.ai_provider.urlopen", lambda *_args, **_kwargs: Response())
+    events: list[ProviderEvent] = []
+    provider = OpenAICompatibleProvider(
+        "secret-key",
+        "https://gateway.example/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        name="9router",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="LOW",
+        structured_finalization_policy="AUTO",
+    )
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)
+
+    assert result.verdict == "FIXED"
+    recovery = [event for event in events if event.finalization_recovery]
+    assert recovery
+    assert any(event.state == "STRUCTURED_VALIDATED" and event.finalization_recovery for event in events)
+    assert all(event.structured_mode == "JSON_OBJECT" for event in recovery)
+    assert all(event.finalization_policy == "AUTO" for event in recovery)
+    assert all("private chain" not in repr(event) for event in events)
+
+
+def test_settings_persist_structured_finalization_policy(tmp_path) -> None:
+    database = str(tmp_path / "finalization-policy.db")
+    api = TestClient(create_app(database))
+
+    initial = api.get("/api/settings")
+    assert initial.status_code == 200
+    assert initial.json()["structured_finalization_policy"] == "AUTO"
+
+    update = {
+        "provider": "openai-compatible",
+        "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+        "models": {"chat": "example/chat"},
+        "structured_finalization_policy": "ALWAYS",
+    }
+    saved = api.put("/api/settings", json=update)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["structured_finalization_policy"] == "ALWAYS"
+
+    reloaded = TestClient(create_app(database)).get("/api/settings")
+    assert reloaded.json()["structured_finalization_policy"] == "ALWAYS"
+
+    invalid = api.put("/api/settings", json={**update, "structured_finalization_policy": "SOMETIMES"})
+    assert invalid.status_code == 422
+
+
+def test_finalization_timeline_carries_effective_budget_and_scheduled_marker(monkeypatch) -> None:
+    bodies = [
+        json.dumps({"choices": [{"finish_reason": "length", "message": {"reasoning_content": "private chain"}}], "usage": {"completion_tokens": 3_200}}).encode(),
+        json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": '{"verdict":"FIXED","notes":"Recovered final structured response."}'}}]}).encode(),
+    ]
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+        index = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            body = bodies[min(self.index, len(bodies) - 1)]
+            Response.index += 1
+            return body
+
+    monkeypatch.setattr("app.ai_provider.urlopen", lambda *_args, **_kwargs: Response())
+    events: list[ProviderEvent] = []
+    provider = OpenAICompatibleProvider(
+        "secret-key",
+        "https://gateway.example/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        name="9router",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="LOW",
+        structured_finalization_policy="AUTO",
+        max_tokens=2_400,
+    )
+
+    result = structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)
+
+    assert result.verdict == "FIXED"
+    scheduled = [event for event in events if event.state == "FINALIZATION_RECOVERY_SCHEDULED"]
+    assert len(scheduled) == 1
+    assert scheduled[0].effective_max_tokens == 1_600
+    # Initial attempt reports the effective role cap (the scheduled marker is
+    # a forward-looking notice of the recovery cap, not the initial cap).
+    assert all(event.effective_max_tokens == 2_400 for event in events if not event.finalization_recovery and event.operation == "structured" and event.state != "FINALIZATION_RECOVERY_SCHEDULED")
+    # Every recovery-lifecycle event reports the bounded 1,600 cap.
+    assert all(event.effective_max_tokens == 1_600 for event in events if event.finalization_recovery)
+    assert all("private chain" not in repr(event) for event in events)
+
+
+def test_exhausted_policy_reports_terminal_suppression_without_scheduled_marker(monkeypatch) -> None:
+    bodies = [json.dumps({"choices": [{"finish_reason": "length", "message": {"reasoning_content": "private chain"}}]}).encode()]
+
+    class Response:
+        headers = {"Content-Type": "application/json"}
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return bodies[0]
+
+    monkeypatch.setattr("app.ai_provider.urlopen", lambda *_args, **_kwargs: Response())
+    events: list[ProviderEvent] = []
+    provider = OpenAICompatibleProvider(
+        "secret-key",
+        "https://gateway.example/v1/chat/completions",
+        "deepseek-v4.1-flash",
+        name="9router",
+        structured_output_mode="JSON_OBJECT",
+        reasoning_effort="LOW",
+        structured_finalization_policy="NEVER",
+        max_tokens=2_400,
+    )
+
+    with pytest.raises(RuntimeError, match="output limit reached before final"):
+        structured_response(provider, FixVerificationResult, "Return JSON.", "Check source.", on_event=events.append)
+
+    assert not [event for event in events if event.state == "FINALIZATION_RECOVERY_SCHEDULED"]
+    failed = [event for event in events if event.error_kind == "OUTPUT_LIMIT_BEFORE_FINAL"]
+    assert failed
+    assert all(event.retry_suppressed for event in failed)
+    assert all(event.effective_max_tokens == 2_400 for event in failed)
