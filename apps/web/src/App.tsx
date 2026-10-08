@@ -7,6 +7,7 @@ import logoUrl from './assets/firmsight-logo.png'
 import { DashboardPage } from './components/DashboardPage'
 import { MetricCard } from './components/MetricCard'
 import { Empty, ErrorState, Loading } from './components/ui'
+import { translate } from './i18n'
 
 const globalPages: Page[] = ['dashboard', 'projects', 'settings']
 const pageLabels: Record<Page, string> = { dashboard: 'Dashboard', projects: 'Projects', overview: 'Overview', code: 'Code', review: 'AI Review', findings: 'Findings', chat: 'AI Chat', architecture: 'Architecture', memory: 'Project Intelligence', yaml: 'YAML Generator', settings: 'Settings' }
@@ -318,6 +319,14 @@ function FixVerificationDetails({ remediation }: { remediation: Finding['remedia
   const report = remediation.verification
   if (!report) return <div className="fix-report"><RemediationBadge remediation={remediation} /><p>{remediation.notes}</p>{remediation.changed_files.length > 0 && <div className="changed-files"><span>Refreshed source</span>{remediation.changed_files.map(path => <code key={path}>{path}</code>)}</div>}</div>
   const evidenceList = (title: string, items: FixVerificationEvidence[]) => <div className="fix-report-group"><strong>{title}</strong>{items.length ? <ul className="fix-report-evidence">{items.map((item, index) => <li key={`${item.file}:${item.line}:${index}`}><code>{item.file}:{item.line}</code><span>{item.description}{item.evidence_snippet && <small>{item.evidence_snippet}</small>}</span></li>)}</ul> : <p>None reported.</p>}</div>
+  const locale = window.localStorage.getItem('firmsight.locale')
+  const coverageStatus: Record<string, string> = {
+    MITIGATED: translate('findings.fix.coverage.mitigated', locale),
+    REMOVED: translate('findings.fix.coverage.removed', locale),
+    REDIRECTED_SAFE: translate('findings.fix.coverage.redirected', locale),
+    STILL_UNSAFE: translate('findings.fix.coverage.unsafe', locale),
+    UNRESOLVED: translate('findings.fix.coverage.unresolved', locale),
+  }
   return <div className="fix-report">
     <div className="fix-report-heading"><RemediationBadge remediation={remediation} /><strong>{Math.round(report.confidence * 100)}% confidence</strong></div>
     {report.validation_status === 'DOWNGRADED' && <div className="fix-report-validation"><strong>AI proposed: {report.model_verdict ?? 'unknown'} · FirmSight validated: {report.verdict}</strong><span>{report.validation_reasons?.[0] ?? 'Current evidence did not satisfy the verdict requirements.'}</span></div>}
@@ -328,6 +337,7 @@ function FixVerificationDetails({ remediation }: { remediation: Finding['remedia
     {evidenceList('Mitigation found', report.mitigations_found)}
     {report.current_execution_path.length > 0 && <div className="fix-report-group"><strong>Current execution path</strong><ol className="execution">{report.current_execution_path.map((step, index) => <li key={`${step}:${index}`}>{step}</li>)}</ol></div>}
     {report.current_path_edges.length > 0 && <div className="fix-report-group"><strong>Current verified path</strong><ul className="fix-report-path">{report.current_path_edges.map((edge, index) => <li key={`${edge.source}:${edge.relation}:${edge.target}:${index}`}><code>{edge.source}</code><span>{edge.relation}</span><code>{edge.target}</code>{edge.file && edge.line && <small>{edge.file}:{edge.line}</small>}</li>)}</ul></div>}
+    {!!report.original_path_coverage?.length && <div className="fix-report-group"><strong>{translate('findings.fix.coverage.title', locale)}</strong><ul className="fix-report-path">{report.original_path_coverage.map((path, index) => <li key={`${path.original_entry}:${index}`}><code>{path.original_entry}</code><span>{path.original_path.join(' → ')}</span><strong>{coverageStatus[path.status] ?? path.status}</strong>{path.note && <small>{path.note}</small>}</li>)}</ul></div>}
     {report.remaining_failure_evidence.length > 0 && evidenceList('Current failure evidence', report.remaining_failure_evidence)}
     {report.missing_context.length > 0 && <div className="fix-report-group"><strong>Missing context</strong><ul>{report.missing_context.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}</ul></div>}
     <details className="fix-report-inspected"><summary>Inspected source and snapshot identifiers</summary>

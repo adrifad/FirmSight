@@ -10,6 +10,7 @@ from typing import Any
 
 from .platform_schemas import (
     FindingBaselineFile,
+    FindingBaselinePath,
     FindingBaselineSymbol,
     FindingRead,
     FindingVerificationBaseline,
@@ -23,10 +24,14 @@ MAX_SIDE_SOURCE_CHARS = 2_400
 MAX_DIFF_CHARS = 2_600
 WINDOW_LINES = 28
 MAX_FINDING_BASELINE_CHARS = 18_000
-MITIGATION_RELATIONS = {
-    "USES_RESOURCE", "PUBLISHES_TO_QUEUE", "RECEIVES_FROM_QUEUE",
-    "OWNERSHIP_TRANSFER", "PASSES_TO_UNKNOWN", "VALIDATES_INPUT",
+ENTRY_RELATIONS = {
+    "APP_ENTRY", "TASK_ENTRY", "ISR_ENTRY", "CALLBACK_ENTRY",
+    "EVENT_HANDLER_ENTRY", "TIMER_ENTRY", "REGISTERED_HANDLER",
 }
+CALL_RELATIONS = {"CALL", "CALLS"}
+PATH_RELATIONS = ENTRY_RELATIONS | CALL_RELATIONS
+MAX_BASELINE_PATHS = 8
+MAX_PATH_DEPTH = 10
 
 
 def _file_hash(item: dict[str, Any]) -> str:
@@ -65,6 +70,79 @@ def _edge_from_relation(relation: dict[str, Any], symbols_by_id: dict[str, dict[
         source_id=source_id or None,
         target_id=target_id or None,
     )
+
+
+def _baseline_relevant_paths(
+    finding: FindingRead,
+    symbols: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+) -> tuple[list[FindingBaselinePath], bool]:
+    """Enumerate a bounded set of observed firmware-entry paths to the finding."""
+    by_id = {str(item.get("id")): item for item in symbols if item.get("id")}
+    sinks = [
+        str(item["id"]) for item in symbols
+        if item.get("kind") == "function"
+        and item.get("name") == finding.location.function
+        and item.get("file") == finding.location.file
+    ]
+    if len(sinks) != 1:
+        return [], bool(sinks)
+    sink_id = sinks[0]
+    entries: list[dict[str, Any]] = []
+    calls: dict[str, list[dict[str, Any]]] = {}
+    for relation in relations:
+        kind = str(relation.get("relation_kind") or "").upper()
+        source_id = str(relation.get("source_symbol_id") or "")
+        target_id = str(relation.get("target_symbol_id") or "")
+        if relation.get("relation_state") != "OBSERVED" or not source_id or not target_id:
+            continue
+        if source_id not in by_id or target_id not in by_id:
+            continue
+        if kind in ENTRY_RELATIONS:
+            entries.append(relation)
+        elif kind in CALL_RELATIONS:
+            calls.setdefault(source_id, []).append(relation)
+    for outgoing in calls.values():
+        outgoing.sort(key=lambda item: (str(item.get("file") or ""), int(item.get("line") or 0), str(item.get("target_symbol_id") or "")))
+    paths: list[FindingBaselinePath] = []
+    truncated = False
+    entries.sort(key=lambda item: (str(item.get("relation_kind") or ""), str(item.get("file") or ""), int(item.get("line") or 0)))
+    for entry_edge in entries:
+        root_id = str(entry_edge.get("target_symbol_id"))
+        root_symbol = by_id[root_id]
+        first_edge = _edge_from_relation(entry_edge, by_id)
+        if first_edge is None:
+            continue
+        pending: list[tuple[str, list[str], list[FixVerificationPathEdge], frozenset[str]]] = [
+            (root_id, [root_id], [first_edge], frozenset({root_id}))
+        ]
+        while pending:
+            current_id, node_ids, path_edges, seen = pending.pop(0)
+            if current_id == sink_id:
+                paths.append(FindingBaselinePath(
+                    entry_name=str(root_symbol.get("name") or root_id),
+                    entry_file=str(root_symbol.get("file") or ""),
+                    entry_relation=str(entry_edge.get("relation_kind") or ""),
+                    path_symbols=[f"{by_id[node].get('file')}:{by_id[node].get('name')}" for node in node_ids],
+                    edges=path_edges,
+                ))
+                if len(paths) >= MAX_BASELINE_PATHS:
+                    truncated = True
+                    return paths, truncated
+                continue
+            if len(path_edges) >= MAX_PATH_DEPTH:
+                if calls.get(current_id):
+                    truncated = True
+                continue
+            for relation in calls.get(current_id, []):
+                target_id = str(relation.get("target_symbol_id") or "")
+                if not target_id or target_id in seen:
+                    continue
+                edge = _edge_from_relation(relation, by_id)
+                if edge is None:
+                    continue
+                pending.append((target_id, [*node_ids, target_id], [*path_edges, edge], seen | {target_id}))
+    return paths, truncated
 
 
 def capture_finding_baseline(
@@ -141,6 +219,8 @@ def capture_finding_baseline(
         edge for relation in edges
         if (edge := _edge_from_relation(relation, symbol_by_id)) is not None
     ][:48]
+    relevant_paths, path_truncated = _baseline_relevant_paths(finding, symbols, relations)
+    topology_truncated = path_truncated or len(edges) >= 48
     fingerprint_payload = {
         "symbols": [item.model_dump(mode="json") for item in baseline_symbols],
         "edges": [item.model_dump(mode="json") for item in edge_models],
@@ -154,6 +234,9 @@ def capture_finding_baseline(
         files=stored_files,
         symbols=baseline_symbols,
         topology_edges=edge_models,
+        relevant_paths=relevant_paths,
+        topology_truncated=topology_truncated,
+        path_coverage_available=True,
     )
 
 
@@ -171,14 +254,14 @@ def _moved_function_candidates(
         return "UNKNOWN", []
     old_callers = [
         edge for edge in baseline.topology_edges
-        if edge.target_id == old.id and edge.relation.upper() in {"CALL", "CALLS", "TASK_ENTRY", "ISR_ENTRY"}
+        if edge.target_id == old.id and edge.relation.upper() in PATH_RELATIONS
     ]
     if not old_callers:
         return "UNKNOWN", []
     by_id = {str(item.get("id")): item for item in current_symbols}
     redirected: dict[str, dict[str, Any]] = {}
     for relation in current_relations:
-        if str(relation.get("relation_kind") or "").upper() not in {"CALL", "CALLS", "TASK_ENTRY", "ISR_ENTRY"}:
+        if str(relation.get("relation_kind") or "").upper() not in PATH_RELATIONS:
             continue
         source = by_id.get(str(relation.get("source_symbol_id") or ""))
         target = by_id.get(str(relation.get("target_symbol_id") or ""))
@@ -338,6 +421,422 @@ def _extract(files: dict[str, dict[str, Any]], ranges: dict[str, list[tuple[int,
         selected[path] = excerpt
         remaining -= len(block)
     return "\n\n".join(blocks), selected
+
+
+def _finding_family(finding: FindingRead | None) -> str | None:
+    if finding is None:
+        return None
+    category = finding.category.casefold().replace("_", " ").replace("-", " ")
+    if any(term in category for term in ("concurr", "race", "freertos")):
+        return "CONCURRENCY"
+    if any(term in category for term in ("lifetime", "resource leak")):
+        return "MEMORY_LIFETIME"
+    if any(term in category for term in ("memory safety", "bounds", "buffer")):
+        return "MEMORY_SAFETY"
+    if "deadlock" in category or "lock order" in category:
+        return "DEADLOCK"
+    if "initialization" in category or "resource state" in category:
+        return "INITIALIZATION"
+    if "api misuse" in category:
+        return "API_MISUSE"
+    text = f"{finding.category} {finding.title} {finding.summary} {finding.runtime_scenario}".casefold().replace("_", " ")
+    if any(term in text for term in ("lifetime", "resource leak", "memory leak", "use after free", "double free")):
+        return "MEMORY_LIFETIME"
+    if any(term in text for term in ("bounds", "buffer", "overflow", "out of range", "invalid length", "memory safety", "memory access")):
+        return "MEMORY_SAFETY"
+    if any(term in text for term in ("race", "concurr", "shared state", "synchron", "data race")):
+        return "CONCURRENCY"
+    if any(term in text for term in ("deadlock", "lock order", "lock cycle")):
+        return "DEADLOCK"
+    if any(term in text for term in ("initialization", "initialized", "resource state")):
+        return "INITIALIZATION"
+    if any(term in text for term in ("api misuse", "invalid api", "calling context")):
+        return "API_MISUSE"
+    return None
+
+
+def _supported_mitigation(family: str | None, line: str, description: str) -> str | None:
+    """Recognize a small set of source-visible mitigations for known invariants."""
+    lowered = line.casefold()
+    narrative = description.casefold()
+    if family == "MEMORY_SAFETY":
+        if re.search(r"\b(if|assert|configASSERT)\b", line) and re.search(r"\b(len|length|size|count|capacity|bound|index)\w*\b", line, re.I):
+            return "BOUNDS_CHECK"
+        if re.search(r"\b(std::span|std::array|Span|[A-Z]\w*Span|strlcpy|snprintf|memcpy_s|copy_n)\b", line):
+            return "BOUNDED_REPRESENTATION"
+        return None
+    if family == "CONCURRENCY":
+        if re.search(r"\breturn\s*;|disable|remove|stop", line, re.I) and re.search(r"remove|removed|no longer|never calls|does not call|without calling|disabled|path", narrative):
+            return "PATH_REMOVAL"
+        if re.search(r"xSemaphoreTake|xSemaphoreTakeRecursive|lock\s*\(|mutex|portENTER_CRITICAL|taskENTER_CRITICAL", line, re.I):
+            return "LOCK_CANDIDATE"
+        if re.search(r"xSemaphoreGive(?:Recursive|FromISR)?\s*\(|unlock\s*\(|portEXIT_CRITICAL|taskEXIT_CRITICAL", line, re.I) and re.search(r"release|unlock|cleanup|error path|exit path", narrative):
+            return "LOCK_RELEASE_CANDIDATE"
+        if re.search(r"xQueueSend|xQueueReceive", line) and re.search(r"cop(?:y|ied|ies)|snapshot|owner|single.writer|ownership", narrative):
+            return "QUEUE_COPY_CANDIDATE"
+        if re.search(r"atomic_(?:fetch|load|store|exchange)|std::atomic|__atomic_", line):
+            return "ATOMIC_OPERATION"
+        if re.search(r"single.writer|sole writer|exclusive owner|ownership transfer", narrative) and re.search(r"owner|copy|queue|move|transfer", lowered):
+            return "OWNERSHIP_CANDIDATE"
+        return None
+    if family == "MEMORY_LIFETIME":
+        if re.search(r"\bfree\s*\(|\bdelete(?:\s*\[\])?\s+|heap_caps_free\s*\(", line):
+            return "RELEASE"
+        if re.search(r"transfer|move|owner|queue|release|take_ownership", line, re.I) and re.search(r"ownership|transfer|move|owner|queue", narrative):
+            return "OWNERSHIP_TRANSFER"
+        return None
+    if family == "DEADLOCK":
+        if re.search(r"lock|unlock|mutex|semaphore|critical", line, re.I) and re.search(r"order|cycle|nested|lock", narrative):
+            return "LOCK_ORDER"
+        return None
+    if family == "INITIALIZATION":
+        if re.search(r"init|initialized|ready|state\s*=", line, re.I) and re.search(r"order|before|initialize|ready|state", narrative):
+            return "INITIALIZATION_GUARD"
+        return None
+    if family == "API_MISUSE":
+        if re.search(r"FromISR|_isr\s*\(|IRAM_ATTR|portYIELD_FROM_ISR", line, re.I):
+            return "CALLING_CONTEXT"
+        return None
+    return None
+
+
+def _function_has_current_lock_cleanup(
+    evidence: FixVerificationEvidence,
+    relations: list[dict[str, Any]],
+    symbols: list[dict[str, Any]],
+    file_lines: dict[str, list[str]],
+    finding: FindingRead | None,
+    baseline: FindingVerificationBaseline | None,
+) -> bool:
+    """Check explicit same-resource release before a nearby error exit."""
+    symbol = next((item for item in symbols if item.get("kind") == "function" and item.get("file") == evidence.file and item.get("name") == evidence.symbol), None)
+    if not symbol:
+        return False
+    symbol_id = str(symbol.get("id") or "")
+    line_number = evidence.line
+    lines = file_lines.get(evidence.file, [])
+    if not 1 <= line_number <= len(lines):
+        return False
+    failure_context = " ".join(
+        [finding.title, finding.summary, *(item.description for item in finding.evidence[:8])]
+        if finding else []
+    )
+    if baseline:
+        failure_context += " " + " ".join(item.excerpt for item in baseline.files[:8])
+    failure_terms = _evidence_terms(failure_context)
+    unlock = next((item for item in relations if
+        str(item.get("source_symbol_id") or "") == symbol_id
+        and str(item.get("relation_kind") or "").upper() == "USES_RESOURCE"
+        and int(item.get("line") or 0) == line_number
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("operation") == "UNLOCK"), None)
+    if unlock is None:
+        return False
+    resource = str(unlock["metadata"].get("resource") or "")
+    stem = re.sub(r"(?:_?(?:mutex|lock|semaphore|sem))$", "", resource, flags=re.I)
+    resource_terms = _evidence_terms(stem)
+    if resource_terms and not resource_terms.intersection(failure_terms):
+        return False
+    locked = any(
+        str(item.get("source_symbol_id") or "") == symbol_id
+        and str(item.get("relation_kind") or "").upper() == "USES_RESOURCE"
+        and isinstance(item.get("metadata"), dict)
+        and item["metadata"].get("operation") == "LOCK"
+        and item["metadata"].get("resource") == resource
+        and int(item.get("line") or 0) < line_number
+        for item in relations
+    )
+    if not locked:
+        return False
+    # Require a nearby error/status guard as well as an early exit, so a normal
+    # success-path unlock is not mistaken for error cleanup.
+    guard_start = max(int(symbol.get("line_start") or 1) - 1, line_number - 4)
+    preceding = "\n".join(lines[guard_start:line_number - 1])
+    guarded_error = any(
+        re.search(r"\bif\s*\([^)]*\b(?:err(?:or)?|fail(?:ed)?|status|result|\brc)\w*\b", line, re.I)
+        for line in preceding.splitlines()
+    )
+    exits_soon = any(re.search(r"\b(return|goto|throw)\b", line) for line in lines[line_number:min(len(lines), line_number + 4)])
+    return guarded_error and exits_soon
+
+
+def _same_line_call_order(source_line: str, call_name: str, lock_api: str, unlock_api: str, resource: str) -> bool:
+    """Resolve ordering on a single line only when all three call sites are explicit."""
+    lock_match = re.search(rf"\b{re.escape(lock_api)}\s*\(\s*&?\s*{re.escape(resource)}\b", source_line)
+    call_match = re.search(rf"\b{re.escape(call_name)}\s*\(", source_line)
+    unlock_match = re.search(rf"\b{re.escape(unlock_api)}\s*\(\s*&?\s*{re.escape(resource)}\b", source_line)
+    return bool(lock_match and call_match and unlock_match and lock_match.start() < call_match.start() < unlock_match.start())
+
+
+def _path_has_matching_lock_guard(
+    path_edges: list[tuple[FixVerificationPathEdge, dict[str, Any]]],
+    relations: list[dict[str, Any]],
+    file_lines: dict[str, list[str]],
+    finding: FindingRead | None = None,
+    baseline: FindingVerificationBaseline | None = None,
+) -> bool:
+    """Find same-resource lock/unlock bracketing a call on this path."""
+    api_pairs = {
+        "xSemaphoreTake": "xSemaphoreGive",
+        "xSemaphoreTakeRecursive": "xSemaphoreGiveRecursive",
+        "xSemaphoreTakeFromISR": "xSemaphoreGiveFromISR",
+        "portENTER_CRITICAL": "portEXIT_CRITICAL",
+        "taskENTER_CRITICAL": "taskEXIT_CRITICAL",
+        "lock": "unlock",
+    }
+    for _, call_relation in path_edges:
+        if str(call_relation.get("relation_kind") or "").upper() not in CALL_RELATIONS:
+            continue
+        source_id = str(call_relation.get("source_symbol_id") or "")
+        call_line = int(call_relation.get("line") or 0)
+        if not source_id or not call_line:
+            continue
+        resources = [
+            relation for relation in relations
+            if str(relation.get("source_symbol_id") or "") == source_id
+            and str(relation.get("relation_kind") or "").upper() == "USES_RESOURCE"
+            and isinstance(relation.get("metadata"), dict)
+        ]
+        locks = [item for item in resources if item["metadata"].get("operation") == "LOCK" and item["metadata"].get("resource")]
+        unlocks = [item for item in resources if item["metadata"].get("operation") == "UNLOCK" and item["metadata"].get("resource")]
+        for acquired in locks:
+            resource = acquired["metadata"].get("resource")
+            resource_stem = re.sub(r"(?:_?(?:mutex|lock|semaphore|sem))$", "", str(resource or ""), flags=re.I)
+            failure_parts = [finding.title, finding.summary, *(item.description for item in finding.evidence[:8])] if finding else []
+            if baseline:
+                failure_parts.extend(item.excerpt for item in baseline.files[:8])
+            failure_context = " ".join(failure_parts)
+            resource_terms = _evidence_terms(resource_stem)
+            failure_terms = _evidence_terms(failure_context)
+            if resource_terms and not resource_terms.intersection(failure_terms):
+                continue
+            release = next((item for item in unlocks if item["metadata"].get("resource") == resource and int(item.get("line") or 0) >= call_line), None)
+            if release is None or int(acquired.get("line") or 0) > call_line:
+                continue
+            if int(acquired.get("line") or 0) < call_line < int(release.get("line") or 0):
+                return True
+            # If all operations share a line, line numbers cannot establish order;
+            # read only that exact current line and require an explicit sequence.
+            if acquired.get("file") == call_relation.get("file") == release.get("file") and call_line == acquired.get("line") == release.get("line"):
+                lines = file_lines.get(str(call_relation.get("file") or ""), [])
+                if 1 <= call_line <= len(lines):
+                    lock_api = str(acquired["metadata"].get("api") or "")
+                    unlock_api = str(release["metadata"].get("api") or "")
+                    symbol = str(call_relation.get("target_name") or "")
+                    if lock_api and unlock_api and symbol and _same_line_call_order(lines[call_line - 1], symbol, lock_api, unlock_api, str(resource)):
+                        return True
+    return False
+
+
+def _path_has_bounds_guard(path_edges: list[tuple[FixVerificationPathEdge, dict[str, Any]]], file_lines: dict[str, list[str]]) -> bool:
+    """Recognize a bounded caller-side length guard immediately around a call."""
+    for _, relation in path_edges:
+        if str(relation.get("relation_kind") or "").upper() not in CALL_RELATIONS:
+            continue
+        path = str(relation.get("file") or "")
+        line_number = int(relation.get("line") or 0)
+        lines = file_lines.get(path, [])
+        if line_number < 1 or line_number > len(lines):
+            continue
+        line = lines[line_number - 1]
+        call_name = str(relation.get("target_name") or "")
+        if not call_name:
+            continue
+        guard = re.search(r"\bif\s*\(([^)]*)\)", line)
+        call = re.search(rf"\b{re.escape(call_name)}\s*\(", line)
+        if guard and call and guard.start() < call.start() and re.search(r"\b(len|length|size|count|capacity|index)\w*\b", guard.group(1), re.I) and re.search(r"sizeof|capacity|size|length|count|bound", guard.group(1), re.I):
+            return True
+    return False
+
+
+def _observed_paths_from_entry(
+    entry_file: str,
+    entry_name: str,
+    entry_relation: str,
+    target_file: str,
+    target_name: str,
+    symbols: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+    *,
+    max_paths: int = 9,
+) -> list[list[dict[str, Any]]]:
+    """Return bounded current paths from a matching observed firmware entry."""
+    by_id = {str(item.get("id")): item for item in symbols if item.get("id")}
+    roots = [item for item in symbols if item.get("kind") == "function" and item.get("file") == entry_file and item.get("name") == entry_name]
+    if len(roots) != 1:
+        return []
+    root_id = str(roots[0]["id"])
+    targets = [item for item in symbols if item.get("kind") == "function" and item.get("file") == target_file and item.get("name") == target_name]
+    if len(targets) != 1:
+        return []
+    target_id = str(targets[0]["id"])
+    incoming = [
+        edge for edge in relations
+        if str(edge.get("relation_kind") or "").upper() == entry_relation.upper()
+        and edge.get("relation_state") == "OBSERVED"
+        and str(edge.get("target_symbol_id") or "") == root_id
+    ]
+    if not incoming:
+        return []
+    graph: dict[str, list[dict[str, Any]]] = {}
+    for edge in relations:
+        if str(edge.get("relation_kind") or "").upper() not in CALL_RELATIONS or edge.get("relation_state") != "OBSERVED":
+            continue
+        if edge.get("source_symbol_id") in by_id and edge.get("target_symbol_id") in by_id:
+            graph.setdefault(str(edge["source_symbol_id"]), []).append(edge)
+    paths: list[list[dict[str, Any]]] = []
+    queue: list[tuple[str, list[dict[str, Any]], frozenset[str]]] = []
+    for entry_edge in incoming:
+        queue.append((root_id, [entry_edge], frozenset({root_id})))
+    while queue and len(paths) < max_paths:
+        current_id, current_path, seen = queue.pop(0)
+        if current_id == target_id:
+            paths.append(current_path)
+            continue
+        if len(current_path) >= MAX_PATH_DEPTH:
+            continue
+        for edge in graph.get(current_id, []):
+            target = str(edge.get("target_symbol_id") or "")
+            if target in seen:
+                continue
+            queue.append((target, [*current_path, edge], seen | {target}))
+    return paths
+
+
+def _path_models(path: list[dict[str, Any]], symbols: list[dict[str, Any]]) -> list[FixVerificationPathEdge]:
+    by_id = {str(item.get("id")): item for item in symbols if item.get("id")}
+    return [edge for relation in path if (edge := _edge_from_relation(relation, by_id)) is not None]
+
+
+def _baseline_path_coverage(
+    baseline: FindingVerificationBaseline,
+    finding: FindingRead,
+    symbols: list[dict[str, Any]],
+    relations: list[dict[str, Any]],
+    valid_mitigations: list[FixVerificationEvidence],
+    file_lines: dict[str, list[str]],
+) -> list[Any]:
+    """Reconcile each captured original entry path with current source/topology."""
+    from .platform_schemas import FixPathCoverage
+
+    by_key = {(str(item.get("file") or ""), str(item.get("name") or "")): item for item in symbols if item.get("kind") == "function"}
+    symbol_by_id = {str(item.get("id")): item for item in symbols if item.get("id")}
+    coverage: list[FixPathCoverage] = []
+    family = _finding_family(finding)
+    for old_path in baseline.relevant_paths[:8]:
+        label = f"{old_path.entry_file}:{old_path.entry_name}"
+        target = by_key.get((finding.location.file, finding.location.function or ""))
+        current_paths = _observed_paths_from_entry(
+            old_path.entry_file, old_path.entry_name, old_path.entry_relation,
+            finding.location.file, finding.location.function or "", symbols, relations,
+        ) if target else []
+        # Reaching the traversal bound means the current graph may contain an
+        # uninspected alternative route. Never infer full mitigation coverage
+        # from a capped path list.
+        if len(current_paths) >= 9:
+            coverage.append(FixPathCoverage(
+                original_entry=label, original_path=old_path.path_symbols,
+                status="UNRESOLVED", note="Current path enumeration reached its bound; additional routes may remain uninspected.",
+            ))
+            continue
+        path_edges = _path_models(current_paths[0], symbols) if current_paths else []
+        if current_paths:
+            mitigated = family == "CONCURRENCY" and all(
+                _path_has_matching_lock_guard(
+                    [(edge, relation) for edge, relation in zip(_path_models(path, symbols), path)],
+                    relations, file_lines, finding, baseline,
+                )
+                or any(
+                    _function_has_current_lock_cleanup(item, relations, symbols, file_lines, finding, baseline)
+                    and str(item.symbol or "") == str(finding.location.function or "")
+                    for item in valid_mitigations
+                )
+                for path in current_paths
+            )
+            if mitigated:
+                coverage.append(FixPathCoverage(
+                    original_entry=label, original_path=old_path.path_symbols, status="MITIGATED",
+                    current_path_edges=path_edges, note="Matching resource lock and release bracket each resolved current path.",
+                ))
+            else:
+                coverage.append(FixPathCoverage(
+                    original_entry=label, original_path=old_path.path_symbols, status="STILL_UNSAFE",
+                    current_path_edges=path_edges, note="An observed current path still reaches the original finding symbol without a validated relevant guard.",
+                ))
+            continue
+
+        # If the original sink is gone or no longer reached, retain a source
+        # path to the nearest surviving baseline caller and require a relevant
+        # current evidence line there before calling the path removed/redirected.
+        survivor: dict[str, Any] | None = None
+        for identity in reversed(old_path.path_symbols[:-1]):
+            old_file, _, old_name = identity.partition(":")
+            if (old_file, old_name) in by_key:
+                survivor = by_key[(old_file, old_name)]
+                break
+        surviving_paths = []
+        if survivor:
+            surviving_paths = _observed_paths_from_entry(
+                old_path.entry_file, old_path.entry_name, old_path.entry_relation,
+                str(survivor.get("file") or ""), str(survivor.get("name") or ""), symbols, relations,
+            )
+        if len(surviving_paths) >= 9:
+            coverage.append(FixPathCoverage(
+                original_entry=label, original_path=old_path.path_symbols,
+                status="UNRESOLVED", note="Current caller-path enumeration reached its bound; additional routes may remain uninspected.",
+            ))
+            continue
+        surviving_ids = {
+            str(value)
+            for path in surviving_paths for relation in path
+            for value in (relation.get("source_symbol_id"), relation.get("target_symbol_id")) if value
+        }
+        surviving_symbols = {str((symbol_by_id.get(item) or {}).get("name") or "") for item in surviving_ids}
+        path_evidence = [item for item in valid_mitigations if item.symbol in surviving_symbols]
+        sink_exists = target is not None
+        removal_evidence = [
+            item for item in path_evidence
+            if _supported_mitigation(family, item.evidence_snippet, item.description) == "PATH_REMOVAL"
+        ]
+        if survivor and surviving_paths and removal_evidence and not sink_exists:
+            coverage.append(FixPathCoverage(
+                original_entry=label, original_path=old_path.path_symbols, status="REMOVED",
+                current_path_edges=_path_models(surviving_paths[0], symbols),
+                evidence=removal_evidence[:2], note="The current observed entry path reaches its original caller, which contains removal evidence; the original sink is absent.",
+            ))
+        elif survivor and surviving_paths and path_evidence and sink_exists:
+            coverage.append(FixPathCoverage(
+                original_entry=label, original_path=old_path.path_symbols, status="REDIRECTED_SAFE",
+                current_path_edges=_path_models(surviving_paths[0], symbols),
+                evidence=path_evidence[:2], note="The old sink is no longer reached; current relevant mitigation evidence is present on the surviving path.",
+            ))
+        else:
+            coverage.append(FixPathCoverage(
+                original_entry=label, original_path=old_path.path_symbols, status="UNRESOLVED",
+                current_path_edges=_path_models(surviving_paths[0], symbols) if surviving_paths else [],
+                note="The original entry path could not be mapped to a current safe, removed, or mitigated path.",
+            ))
+    if family == "CONCURRENCY" and len(baseline.relevant_paths) > 1:
+        current_paths, current_paths_truncated = _baseline_relevant_paths(finding, symbols, relations)
+        unprotected = [item for item in coverage if item.status == "STILL_UNSAFE"]
+        isolated_paths = [
+            item for item in coverage
+            if item.status == "REDIRECTED_SAFE"
+            and item.evidence
+            and any(_supported_mitigation(family, evidence.evidence_snippet, evidence.description) == "QUEUE_COPY_CANDIDATE" for evidence in item.evidence)
+        ]
+        if (
+            not current_paths_truncated
+            and len(current_paths) == 1
+            and len(unprotected) == 1
+            and len(isolated_paths) == len(baseline.relevant_paths) - 1
+        ):
+            only_writer = unprotected[0]
+            coverage[coverage.index(only_writer)] = only_writer.model_copy(update={
+                "status": "MITIGATED",
+                "note": "Current topology resolves one writer path; every other original path now consumes an isolated queue copy.",
+            })
+    return coverage
 
 
 def build_differential_context(
@@ -504,7 +1003,7 @@ def validate_fix_verification(
     moved_status, moved_candidates = _moved_function_candidates(finding, baseline, current_symbols, current_relations) if finding else ("UNKNOWN", [])
     for item in moved_candidates:
         allowed_symbols.add(str(item.get("id")))
-    path_relation_kinds = {"CALL", "CALLS", "TASK_ENTRY", "ISR_ENTRY"}
+    path_relation_kinds = PATH_RELATIONS
 
     def relation_matches(edge: FixVerificationPathEdge, relation: dict[str, Any]) -> bool:
         relation_kind = str(relation.get("relation_kind") or "").upper()
@@ -565,10 +1064,10 @@ def validate_fix_verification(
         for _, relation in validated_edge_pairs for key in ("source_symbol_id", "target_symbol_id")
         if relation.get(key)
     }
-    current_entry_path = any(
-        edge.relation.upper() in {"TASK_ENTRY", "ISR_ENTRY"}
-        and edge.relation_state == "OBSERVED"
-        for edge in validated_edges
+    current_entry_path = bool(
+        validated_edges
+        and validated_edges[0].relation.upper() in ENTRY_RELATIONS
+        and validated_edges[0].relation_state == "OBSERVED"
     )
 
     def current_evidence(item, *, require_path_sink: bool = False):
@@ -617,11 +1116,17 @@ def validate_fix_verification(
                     return None
         else:
             # A valid line in a related function is not automatically support
-            # for a mitigation claim. Ground specific claim terms in source.
+            # for a mitigation claim. The finding invariant selects a narrow
+            # source pattern; lexical overlap alone does not make an operation
+            # relevant to the bug category.
             mitigation_terms = _evidence_terms(item.description + " " + (finding.recommendation if finding else ""))
             line_terms = _evidence_terms(stripped)
             symbol_terms = _evidence_terms(str(symbol.get("name") or ""))
-            if mitigation_terms and not mitigation_terms.intersection(line_terms | symbol_terms):
+            family = _finding_family(finding)
+            mitigation_kind = _supported_mitigation(family, stripped, item.description) if family else None
+            if family and mitigation_kind is None:
+                return None
+            if family is None and mitigation_terms and not mitigation_terms.intersection(line_terms | symbol_terms):
                 return None
         # The copied model snippet is a hint only. Persist the canonical current
         # source line after validating its file, line, symbol, and relationship.
@@ -640,6 +1145,11 @@ def validate_fix_verification(
     ]
     valid_inspected_files = [path for path in result.inspected_files if path in files]
     valid_inspected_symbols = [name for name in result.inspected_symbols if any(item.get("name") == name for item in current_symbols)]
+    computed_coverage = (
+        _baseline_path_coverage(baseline, finding, current_symbols, current_relations, valid_mitigations, file_lines)
+        if baseline is not None and finding is not None and baseline.path_coverage_available
+        else []
+    )
     # The AI response may contain compatibility/extra fields despite the
     # prompt; only the submitted verdict is treated as its proposal. Validation
     # metadata is always recomputed and overwritten below.
@@ -648,26 +1158,15 @@ def validate_fix_verification(
     # Never trust model-authored validation metadata. The validator derives its
     # reasons afresh from current source and topology on every invocation.
     reasons: list[str] = []
-    path_sink_symbols = {
-        str((symbols_by_id.get(symbol_id) or {}).get("name") or "")
-        for symbol_id in path_symbol_ids
-    }
-    path_has_mitigation_relation = any(
-        str(relation.get("relation_kind") or "").upper() in MITIGATION_RELATIONS
-        and bool(path_symbol_ids.intersection({str(relation.get("source_symbol_id") or ""), str(relation.get("target_symbol_id") or "")}))
-        for relation in current_relations
+    family = _finding_family(finding)
+    matching_lock_guard = family == "CONCURRENCY" and _path_has_matching_lock_guard(
+        validated_edge_pairs, current_relations, file_lines, finding, baseline
     )
-    mitigation_intersects_path = any(item.symbol in path_sink_symbols for item in valid_mitigations)
-    source_guard_on_path = any(
-        str(relation.get("relation_kind") or "").upper() in path_relation_kinds
-        and relation.get("file") in file_lines
-        and relation.get("line") is not None
-        and bool(re.search(
-            r"\b(if|switch|assert|validate|check|bounds|length|size|mutex|semaphore|lock|critical|queue)\b|xSemaphoreTake|portENTER_CRITICAL",
-            "\n".join(file_lines[str(relation["file"])][max(0, int(relation["line"]) - 3):min(len(file_lines[str(relation["file"])]), int(relation["line"]) + 2)]),
-            re.IGNORECASE,
-        ))
-        for _, relation in validated_edge_pairs
+    matching_bounds_guard = family == "MEMORY_SAFETY" and _path_has_bounds_guard(validated_edge_pairs, file_lines)
+    relevant_mitigation_on_path = any(
+        (symbol := symbols_by_name_file.get((item.symbol or "", item.file))) is not None
+        and str(symbol.get("id") or "") in path_symbol_ids
+        for item in valid_mitigations
     )
 
     if verdict == "STILL_PRESENT":
@@ -676,15 +1175,17 @@ def validate_fix_verification(
         if not result.current_path_edges or not edges_chain:
             reasons.append("Current path edges were missing, fabricated, ambiguous, or disconnected from current indexed topology.")
         if not current_entry_path:
-            reasons.append("The verified current path does not include an observed task or ISR entry relation.")
+            reasons.append("The verified current path does not originate at a deterministically observed firmware entry point.")
         if not result.current_execution_path:
             reasons.append("The engineer-readable current path summary is missing.")
         if result.missing_context:
             reasons.append("The verifier reported unresolved current context.")
-        if path_has_mitigation_relation or mitigation_intersects_path:
-            reasons.append("Current resource or mitigation evidence intersects the claimed path, but coverage or bypass was not established.")
-        if source_guard_on_path:
-            reasons.append("Current source shows a guard or synchronization operation on the path, but its coverage was not established.")
+        if matching_lock_guard:
+            reasons.append("A same-resource lock/unlock pair brackets a current path call; the verifier did not establish a bypass or uncovered access.")
+        if matching_bounds_guard:
+            reasons.append("A caller-side length and capacity guard dominates the indexed call on this path; the verifier did not establish an invalid-length bypass.")
+        elif relevant_mitigation_on_path:
+            reasons.append("Category-relevant mitigation evidence intersects the current path, but its coverage or bypass was not established.")
         # A moved implementation is accepted only when the original indexed
         # caller redirects to one uniquely supported current implementation.
         if finding and valid_remaining and valid_remaining[0].symbol != finding.location.function and moved_status != "RESOLVED":
@@ -693,7 +1194,7 @@ def validate_fix_verification(
             verdict = "INCONCLUSIVE"
     elif verdict == "FIXED":
         if not valid_mitigations:
-            reasons.append("No current-source mitigation or removal evidence was validated.")
+            reasons.append("No current-source mitigation matched the original failure category.")
         if not result.original_failure_condition.strip() or not result.current_execution_path or not result.reasoning_summary.strip():
             reasons.append("The original failure condition or evidence-based fix explanation is incomplete.")
         if result.missing_context:
@@ -702,6 +1203,16 @@ def validate_fix_verification(
             reasons.append("The response also supplied current evidence for a remaining failure path.")
         if result.current_path_edges and invalid_edge_count:
             reasons.append("One or more proposed current path edges do not match current indexed topology.")
+        if baseline is not None and baseline.path_coverage_available:
+            safe_coverage = {"MITIGATED", "REMOVED", "REDIRECTED_SAFE"}
+            if baseline.topology_truncated:
+                reasons.append("Finding-time topology was truncated, so all original relevant paths cannot be accounted for.")
+            if not baseline.relevant_paths:
+                reasons.append("The finding-time index could not resolve any original firmware entry path for coverage.")
+            if len(computed_coverage) != len(baseline.relevant_paths) or any(item.status not in safe_coverage for item in computed_coverage):
+                unresolved = [item.original_entry for item in computed_coverage if item.status not in safe_coverage]
+                suffix = f" Unaccounted paths: {', '.join(unresolved[:4])}." if unresolved else ""
+                reasons.append("Not every deterministically known finding-time path has validated current mitigation or removal evidence." + suffix)
         # If the baseline/current graph still has the same reachable sink and
         # no path-local mitigation was grounded, the fix claim is unsupported.
         if validated_edge_pairs and valid_remaining:
@@ -718,7 +1229,7 @@ def validate_fix_verification(
             reachable_ids = {
                 str(relation.get("target_symbol_id") or "")
                 for relation in current_relations
-                if str(relation.get("relation_kind") or "").upper() in {"TASK_ENTRY", "ISR_ENTRY"}
+                if str(relation.get("relation_kind") or "").upper() in ENTRY_RELATIONS
                 and relation.get("relation_state") == "OBSERVED"
                 and relation.get("target_symbol_id")
             }
@@ -727,7 +1238,7 @@ def validate_fix_verification(
                 changed = False
                 for relation in current_relations:
                     if (
-                        str(relation.get("relation_kind") or "").upper() in {"CALL", "CALLS"}
+                        str(relation.get("relation_kind") or "").upper() in CALL_RELATIONS
                         and relation.get("relation_state") == "OBSERVED"
                         and str(relation.get("source_symbol_id") or "") in reachable_ids
                         and relation.get("target_symbol_id")
@@ -744,7 +1255,7 @@ def validate_fix_verification(
             )
             caller_redirects = any(
                 str(relation.get("source_symbol_id") or "") in current_caller_ids
-                and str(relation.get("relation_kind") or "").upper() in {"CALL", "CALLS", "TASK_ENTRY", "ISR_ENTRY"}
+                and str(relation.get("relation_kind") or "").upper() in PATH_RELATIONS
                 for relation in current_relations
             )
             if not all_callers_resolved or not all_callers_reachable or not caller_evidence or caller_redirects:
@@ -766,6 +1277,7 @@ def validate_fix_verification(
         "mitigations_found": valid_mitigations,
         "remaining_failure_evidence": valid_remaining,
         "current_path_edges": validated_edges,
+        "original_path_coverage": computed_coverage if baseline is not None and baseline.path_coverage_available else result.original_path_coverage,
         "inspected_files": valid_inspected_files,
         "inspected_symbols": valid_inspected_symbols,
         "missing_context": missing_context,

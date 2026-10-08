@@ -3,12 +3,14 @@ export type ProjectFile = { path: string; language: string; size: number; conten
 export type ProjectSourceSync = { project_id: string; file_count: number; symbol_count: number; language: string | null; framework: string | null; target: string | null; build_system: string | null; changed_files: string[] }
 export type FixVerificationEvidence = { file: string; line: number; symbol?: string | null; evidence_snippet: string; description: string }
 export type FixVerificationPathEdge = { source: string; relation: string; target: string; file?: string | null; line?: number | null; relation_state?: string | null; source_id?: string | null; target_id?: string | null }
+export type FixPathCoverage = { original_entry: string; original_path: string[]; status: 'MITIGATED' | 'REMOVED' | 'REDIRECTED_SAFE' | 'STILL_UNSAFE' | 'UNRESOLVED'; current_path_edges: FixVerificationPathEdge[]; evidence: FixVerificationEvidence[]; note: string }
 export type FixVerificationReport = {
   verdict: 'FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE'
   original_failure_condition: string
   original_execution_path: string[]
   current_execution_path: string[]
   current_path_edges: FixVerificationPathEdge[]
+  original_path_coverage?: FixPathCoverage[]
   mitigations_found: FixVerificationEvidence[]
   remaining_failure_evidence: FixVerificationEvidence[]
   inspected_files: string[]

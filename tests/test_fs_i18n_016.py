@@ -206,7 +206,7 @@ def test_prompt_versions_bumped_for_language_block():
     versions = {name: getattr(prompts, name) for _system, name in PROMPT_ROLES}
     # Every role version moved past v1/v2 baseline recorded before FS-I18N-016.
     assert versions["INVESTIGATOR_PROMPT_VERSION"] == "v3"
-    assert versions["FIX_VERIFIER_PROMPT_VERSION"] == "v4"
+    assert versions["FIX_VERIFIER_PROMPT_VERSION"] == "v5"
     for name in ("VERIFIER_PROMPT_VERSION", "YAML_GENERATOR_PROMPT_VERSION", "MEMORY_SYNTHESIZER_PROMPT_VERSION", "MEMORY_VERIFIER_PROMPT_VERSION", "CHAT_PROMPT_VERSION"):
         assert versions.get(name, getattr(prompts, name)) == "v2", name
     assert prompts.LANGUAGE_INSTRUCTION_VERSION == "v1"

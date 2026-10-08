@@ -14,6 +14,21 @@ RELEASERS = {"free", "delete", "delete[]", "heap_caps_free"}
 CONTROL_NAMES = {"if", "for", "while", "switch", "catch", "return", "sizeof", "alignof"}
 TASK_CREATORS = {"xTaskCreate", "xTaskCreatePinnedToCore"}
 ISR_CREATORS = {"gpio_isr_handler_add", "esp_intr_alloc", "esp_intr_alloc_intrstatus"}
+CALLBACK_APIS = {
+    # API name: (callback argument index, relation kind)
+    "esp_event_handler_register": (2, "EVENT_HANDLER_ENTRY"),
+    "esp_event_handler_instance_register": (2, "EVENT_HANDLER_ENTRY"),
+    "esp_mqtt_client_register_event": (2, "CALLBACK_ENTRY"),
+    "xTimerCreate": (4, "TIMER_ENTRY"),
+    "gpio_isr_handler_add": (1, "ISR_ENTRY"),
+    "esp_intr_alloc": (2, "ISR_ENTRY"),
+    "esp_intr_alloc_intrstatus": (2, "ISR_ENTRY"),
+}
+CALLBACK_STRUCT_APIS = {
+    # API name: (configuration argument index, field, struct type, entry relation)
+    "httpd_register_uri_handler": (1, "handler", "httpd_uri_t", "REGISTERED_HANDLER"),
+    "esp_timer_create": (0, "callback", "esp_timer_create_args_t", "TIMER_ENTRY"),
+}
 RESOURCE_CREATORS = {
     "xQueueCreate": "queue", "xQueueCreateStatic": "queue", "xSemaphoreCreateMutex": "mutex",
     "xSemaphoreCreateBinary": "semaphore", "xSemaphoreCreateCounting": "semaphore",
@@ -22,9 +37,55 @@ RESOURCE_CREATORS = {
 RESOURCE_OPERATIONS = {
     "xQueueSend": "PUBLISHES_TO_QUEUE", "xQueueSendToBack": "PUBLISHES_TO_QUEUE", "xQueueSendFromISR": "PUBLISHES_TO_QUEUE",
     "xQueueReceive": "RECEIVES_FROM_QUEUE", "xQueueReceiveFromISR": "RECEIVES_FROM_QUEUE",
-    "xSemaphoreTake": "USES_RESOURCE", "xSemaphoreGive": "USES_RESOURCE", "xSemaphoreTakeFromISR": "USES_RESOURCE",
+    "xSemaphoreTake": "USES_RESOURCE", "xSemaphoreTakeRecursive": "USES_RESOURCE",
+    "xSemaphoreGive": "USES_RESOURCE", "xSemaphoreGiveRecursive": "USES_RESOURCE",
+    "xSemaphoreTakeFromISR": "USES_RESOURCE", "xSemaphoreGiveFromISR": "USES_RESOURCE",
     "xEventGroupWaitBits": "USES_RESOURCE", "xEventGroupSetBits": "USES_RESOURCE",
+    "portENTER_CRITICAL": "USES_RESOURCE", "portEXIT_CRITICAL": "USES_RESOURCE",
+    "taskENTER_CRITICAL": "USES_RESOURCE", "taskEXIT_CRITICAL": "USES_RESOURCE",
 }
+RESOURCE_OPERATION_TYPES = {
+    "xQueueSend": "QUEUE_SEND", "xQueueSendToBack": "QUEUE_SEND", "xQueueSendFromISR": "QUEUE_SEND",
+    "xQueueReceive": "QUEUE_RECEIVE", "xQueueReceiveFromISR": "QUEUE_RECEIVE",
+    "xSemaphoreTake": "LOCK", "xSemaphoreTakeRecursive": "LOCK", "xSemaphoreTakeFromISR": "LOCK",
+    "xSemaphoreGive": "UNLOCK", "xSemaphoreGiveRecursive": "UNLOCK", "xSemaphoreGiveFromISR": "UNLOCK",
+    "xEventGroupWaitBits": "WAIT", "xEventGroupSetBits": "SIGNAL",
+    "portENTER_CRITICAL": "LOCK", "taskENTER_CRITICAL": "LOCK",
+    "portEXIT_CRITICAL": "UNLOCK", "taskEXIT_CRITICAL": "UNLOCK",
+}
+
+
+def _call_arguments(text: str, opening: int) -> list[str] | None:
+    """Split one C/C++ call argument list while respecting nested delimiters."""
+    closing = _matching(text, opening, "(", ")")
+    if closing is None:
+        return None
+    result: list[str] = []
+    start = opening + 1
+    parens = brackets = braces = 0
+    for index in range(start, closing):
+        char = text[index]
+        if char == "(": parens += 1
+        elif char == ")": parens = max(0, parens - 1)
+        elif char == "[": brackets += 1
+        elif char == "]": brackets = max(0, brackets - 1)
+        elif char == "{": braces += 1
+        elif char == "}": braces = max(0, braces - 1)
+        elif char == "," and not (parens or brackets or braces):
+            result.append(text[start:index].strip())
+            start = index + 1
+    final = text[start:closing].strip()
+    if final or result:
+        result.append(final)
+    return result
+
+
+def _simple_argument_name(value: str) -> str | None:
+    value = re.sub(r"\s+", "", value)
+    while value.startswith("(") and value.endswith(")"):
+        value = value[1:-1]
+    match = re.fullmatch(r"&?([A-Za-z_]\w*)", value)
+    return match.group(1) if match else None
 
 
 def safe_project_path(path: str) -> str:
@@ -202,7 +263,14 @@ class FirmwareIndexer:
         functions: list[_Function] = []
         source_records: list[tuple[str, str, str]] = []
         all_content = "\n".join(file["content"] for file in files)
+        masked_content = "\n".join(mask_comments_and_strings(file["content"]) for file in files if any(file["path"].lower().endswith(extension) for extension in CODE_EXTENSIONS))
         paths = {file["path"].lower() for file in files}
+        esp_idf_evidence = (
+            any("idf_component.yml" in path or "sdkconfig" in path for path in paths)
+            or any(re.search(r"#\s*include\s*[<\"]esp_err\.h[>\"]", str(file.get("content", ""))) for file in files)
+            or bool(re.search(r"\b(?:esp_err\.h|esp_event_handler_register|esp_mqtt_client_register_event|esp_timer_create|esp_ota_[A-Za-z_]\w*)\b", masked_content))
+        )
+        framework = "ESP-IDF" if esp_idf_evidence else None
         for file in files:
             path, content = file["path"], file["content"]
             if not any(path.lower().endswith(extension) for extension in CODE_EXTENSIONS): continue
@@ -244,8 +312,17 @@ class FirmwareIndexer:
                 body = masked[function["_body_start"]:function["_body_end"]]
                 self._add_calls(project_id, path, content, body, function, by_name, relations)
                 self._add_tasks_and_isrs(project_id, path, content, body, function, by_name, relations)
+                self._add_registered_callbacks(project_id, path, content, masked, body, function, by_name, relations)
                 self._add_resources(project_id, path, content, body, function, relations)
                 self._add_allocations(project_id, path, content, body, function, allocations, relations)
+        if framework == "ESP-IDF":
+            for function in function_symbols:
+                if function["name"] == "app_main":
+                    self._relation(
+                        relations, project_id, "APP_ENTRY", function["id"], function["id"],
+                        function["name"], function["file"], int(function["line_start"]),
+                        "OBSERVED", 1.0, {"framework": "ESP-IDF"},
+                    )
         for path, content, masked in source_records:
             for match in re.finditer(r"\b(?:xTaskCreate(?:PinnedToCore)?|xQueueCreate|xSemaphoreCreateMutex|xSemaphoreCreateBinary|xEventGroupCreate)\s*\(", masked):
                 line = _line_at(content, match.start())
@@ -261,7 +338,7 @@ class FirmwareIndexer:
                         symbols.append({"id": self._stable_id(project_id, "resource", path, api, str(line)), "name": api, "kind": RESOURCE_CREATORS.get(api, "resource"), "file": path, "line_start": line, "line_end": line, "signature": api, "component": _component_for(path), "source_hash": self.digest(content), "confidence": 1.0})
         relation_fingerprint = compute_topology_fingerprint(relations, allocations, self.digest)
         language = "C++" if any(path.endswith((".cpp", ".hpp", ".cc", ".cxx")) for path in paths) else "C" if any(path.endswith((".c", ".h")) for path in paths) else None
-        framework = "ESP-IDF" if any("idf_component.yml" in path or "sdkconfig" in path for path in paths) or "esp_err.h" in all_content else None
+        framework = framework or ("ESP-IDF" if "esp_err.h" in masked_content else None)
         target_match = re.search(r"CONFIG_IDF_TARGET_([A-Z0-9_]+)=y", all_content)
         target = target_match.group(1).replace("_", "-") if target_match else ("ESP32" if "esp_" in all_content else None)
         build_system = "CMake" if "cmakelists.txt" in paths else "PlatformIO" if "platformio.ini" in paths else None
@@ -277,19 +354,90 @@ class FirmwareIndexer:
 
     def _add_tasks_and_isrs(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], by_name: dict[str, list[dict[str, Any]]], relations: list[dict[str, Any]]) -> None:
         for api in (*TASK_CREATORS, *ISR_CREATORS):
-            for match in re.finditer(rf"\b{re.escape(api)}\s*\(([^;]*?)\)", body, re.S):
-                args = [item.strip() for item in match.group(1).split(",")]
-                raw = args[0] if api in TASK_CREATORS else (args[1] if len(args) > 1 else "")
-                entry = re.match(r"(?:&\s*)?([A-Za-z_]\w*)$", raw)
-                if not entry: continue
-                name = entry.group(1); candidates = by_name.get(name, []); target = candidates[0] if len(candidates) == 1 else None
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                args = _call_arguments(body, body.find("(", match.start()))
+                if args is None: continue
+                callback_index = 0 if api in TASK_CREATORS else 1 if api == "gpio_isr_handler_add" else 2
+                name = _simple_argument_name(args[callback_index]) if len(args) > callback_index else None
+                if not name: continue
+                candidates = by_name.get(name, []); target = candidates[0] if len(candidates) == 1 else None
                 kind = "TASK_ENTRY" if api in TASK_CREATORS else "ISR_ENTRY"
                 self._relation(relations, project_id, kind, source["id"], target["id"] if target else None, None if target else name, path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED" if target else "INFERRED", 1.0 if target else 0.35, {"creator": api})
+
+    def _add_registered_callbacks(self, project_id: str, path: str, content: str, file_masked: str, body: str, source: dict[str, Any], by_name: dict[str, list[dict[str, Any]]], relations: list[dict[str, Any]]) -> None:
+        """Index only callback registrations whose function pointer is explicit."""
+        for api, (callback_index, relation_kind) in CALLBACK_APIS.items():
+            if api in TASK_CREATORS or api in ISR_CREATORS:
+                continue
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                args = _call_arguments(body, body.find("(", match.start()))
+                if args is None or len(args) <= callback_index:
+                    continue
+                callback_name = _simple_argument_name(args[callback_index])
+                self._add_callback_relation(project_id, path, content, source, by_name, relations, callback_name, relation_kind, api, match.start())
+
+        for api, (config_index, field, struct_type, relation_kind) in CALLBACK_STRUCT_APIS.items():
+            declarations: dict[str, list[tuple[str, str | None]]] = {}
+            for declaration in re.finditer(rf"\b{re.escape(struct_type)}\s+([A-Za-z_]\w*)\s*=\s*\{{", file_masked):
+                opening = file_masked.find("{", declaration.start())
+                closing = _matching(file_masked, opening, "{", "}")
+                if closing is None:
+                    continue
+                initializer = file_masked[opening + 1:closing]
+                callback = re.search(rf"\.\s*{re.escape(field)}\s*=\s*&?\s*([A-Za-z_]\w*)\b", initializer)
+                if callback:
+                    owner = next((
+                        function for functions in by_name.values() for function in functions
+                        if function.get("kind") == "function"
+                        and int(function.get("_body_start") or 0) <= declaration.start() < int(function.get("_body_end") or 0)
+                    ), None)
+                    owner_id = str(owner.get("id")) if owner else None
+                    declarations.setdefault(declaration.group(1), []).append((callback.group(1), owner_id))
+            for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
+                args = _call_arguments(body, body.find("(", match.start()))
+                if args is None or len(args) <= config_index:
+                    continue
+                config_name = _simple_argument_name(args[config_index])
+                candidates = [
+                    callback for callback, owner_id in declarations.get(config_name or "", [])
+                    if owner_id is None or owner_id == str(source.get("id"))
+                ]
+                local_candidates = [
+                    callback for callback, owner_id in declarations.get(config_name or "", [])
+                    if owner_id == str(source.get("id"))
+                ]
+                if local_candidates:
+                    candidates = local_candidates
+                callback_name = candidates[0] if len(set(candidates)) == 1 else None
+                self._add_callback_relation(project_id, path, content, source, by_name, relations, callback_name, relation_kind, api, match.start(), config=config_name)
+
+    def _add_callback_relation(self, project_id: str, path: str, content: str, source: dict[str, Any], by_name: dict[str, list[dict[str, Any]]], relations: list[dict[str, Any]], callback_name: str | None, relation_kind: str, api: str, offset: int, *, config: str | None = None) -> None:
+        if not callback_name:
+            return
+        candidates = by_name.get(callback_name, [])
+        target = candidates[0] if len(candidates) == 1 else None
+        metadata = {"api": api, "registration": "STATIC_ARGUMENT" if config is None else "STATIC_INITIALIZER"}
+        if config:
+            metadata["config"] = config
+        self._relation(
+            relations, project_id, relation_kind, source["id"], target["id"] if target else None,
+            None if target else callback_name, path,
+            _line_at(content, source["_body_start"] + offset),
+            "OBSERVED" if target else "INFERRED", 1.0 if target else 0.35, metadata,
+        )
 
     def _add_resources(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], relations: list[dict[str, Any]]) -> None:
         for api, relation_kind in RESOURCE_OPERATIONS.items():
             for match in re.finditer(rf"\b{re.escape(api)}\s*\(", body):
-                self._relation(relations, project_id, relation_kind, source["id"], None, api, path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0)
+                arguments = _call_arguments(body, body.find("(", match.start()))
+                if arguments is None:
+                    continue
+                resource_index = 0
+                resource = _simple_argument_name(arguments[resource_index]) if arguments else None
+                metadata = {"api": api, "operation": RESOURCE_OPERATION_TYPES.get(api, "RESOURCE")}
+                if resource:
+                    metadata["resource"] = resource
+                self._relation(relations, project_id, relation_kind, source["id"], None, api, path, _line_at(content, source["_body_start"] + match.start()), "OBSERVED", 1.0, metadata)
 
     def _add_allocations(self, project_id: str, path: str, content: str, body: str, source: dict[str, Any], allocations: list[dict[str, Any]], relations: list[dict[str, Any]]) -> None:
         for match in re.finditer(r"\b([A-Za-z_]\w*(?:\[\])?)\s*\(", body):

@@ -735,6 +735,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -758,6 +759,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -897,6 +899,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -921,6 +924,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -966,6 +970,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """
     source_b = source_a.replace("esp_ota_begin(NULL,", "esp_ota_begin(sync_state_b,")
     source_c = source_a.replace("        return err;", "        xSemaphoreGive(ota_mutex);\n        return err;")
@@ -1009,6 +1014,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -1028,6 +1034,87 @@ esp_err_t ota_install(void) {
     # indexed caller/task entry proving it remains reachable.
     assert payload["remediation"]["status"] == "INCONCLUSIVE"
     assert payload["remediation"]["verification"]["remaining_failure_evidence"] == []
+
+
+def test_verify_fix_persists_observed_mqtt_callback_path_end_to_end(tmp_path):
+    class CallbackPathProvider(FixtureProvider):
+        def __init__(self):
+            super().__init__(source_path="src/main.c")
+
+        def chat(self, system_prompt: str, user_prompt: str) -> str:
+            if "Investigator" in system_prompt:
+                return json.dumps({"findings": [{
+                    "title": "Unchecked payload index reaches shared buffer",
+                    "classification": "CONFIRMED_BUG", "severity": "high", "category": "MEMORY_SAFETY", "confidence": 0.94,
+                    "location": {"file": "src/main.c", "function": "unsafe_copy", "line_start": 1, "line_end": 1},
+                    "summary": "An unchecked payload index can write beyond shared_buffer.",
+                    "evidence": [{"description": "The payload index is used without a bound check.", "file": "src/main.c", "line": 1}],
+                    "execution_path": ["mqtt_event_handler", "parse_payload", "unsafe_copy"],
+                    "runtime_scenario": "A malformed MQTT payload can supply an out-of-range index.",
+                    "impact": "Memory corruption can occur.", "assumptions": [],
+                    "recommendation": "Validate payload bounds before writing.",
+                }]})
+            if "Fix Verifier" in system_prompt:
+                return json.dumps({
+                    "verdict": "STILL_PRESENT",
+                    "original_failure_condition": "An unvalidated payload index reaches a shared buffer write.",
+                    "original_execution_path": ["mqtt_event_handler", "parse_payload", "unsafe_copy"],
+                    "current_execution_path": ["registered MQTT callback", "mqtt_event_handler", "parse_payload", "unsafe_copy"],
+                    "current_path_edges": [
+                        {"source": "register_mqtt", "relation": "CALLBACK_ENTRY", "target": "mqtt_event_handler", "file": "src/main.c", "line": 4, "relation_state": "OBSERVED"},
+                        {"source": "mqtt_event_handler", "relation": "CALLS", "target": "parse_payload", "file": "src/main.c", "line": 3, "relation_state": "OBSERVED"},
+                        {"source": "parse_payload", "relation": "CALLS", "target": "unsafe_copy", "file": "src/main.c", "line": 2, "relation_state": "OBSERVED"},
+                    ],
+                    "mitigations_found": [],
+                    "remaining_failure_evidence": [{
+                        "file": "src/main.c", "line": 1, "symbol": "unsafe_copy", "evidence_snippet": "formatting hint differs",
+                        "description": "The current unchecked payload index write remains reachable.",
+                    }],
+                    "inspected_files": ["src/main.c"], "inspected_symbols": ["unsafe_copy", "parse_payload", "mqtt_event_handler"],
+                    "missing_context": [], "alternative_mitigation": False, "confidence": 0.96,
+                    "reasoning_summary": "The current registered MQTT callback reaches the unchecked buffer write.",
+                })
+            if "Verifier" in system_prompt:
+                return json.dumps({"verdict": "SURVIVES", "notes": "The unchecked write is reachable from the registered callback."})
+            return super().chat(system_prompt, user_prompt)
+
+    import_root = tmp_path / "callback-workspace"
+    project_directory = import_root / "mqtt-device"
+    source_directory = project_directory / "src"
+    source_directory.mkdir(parents=True)
+    (source_directory / "main.c").write_text(
+        """void unsafe_copy(void) { shared_buffer[index] = value; }
+void parse_payload(void) { unsafe_copy(); }
+void mqtt_event_handler(void) { parse_payload(); }
+void register_mqtt(void) { esp_mqtt_client_register_event(client, event, mqtt_event_handler, NULL); }
+""",
+        encoding="utf-8",
+    )
+    db_path = str(tmp_path / "callback-verify.db")
+    provider = CallbackPathProvider()
+    api = TestClient(create_app(db_path, str(import_root), provider_resolver=lambda _role: provider))
+    project = api.post("/api/projects/import-directory", json={"directory": str(project_directory)}).json()
+    review = api.post(f"/api/projects/{project['id']}/reviews", json={"focus": ["memory safety"]})
+    assert review.status_code == 201, review.text
+    finding = api.get(f"/api/projects/{project['id']}/findings").json()[0]
+    accepted = api.patch(f"/api/projects/{project['id']}/findings/{finding['id']}/decision", json={"decision": "ACCEPTED"})
+    assert accepted.status_code == 200, accepted.text
+
+    verified = api.post(f"/api/projects/{project['id']}/findings/{finding['id']}/verify-fix")
+
+    assert verified.status_code == 200, verified.text
+    payload = verified.json()
+    verification = payload["remediation"]["verification"]
+    assert payload["remediation"]["status"] == "STILL_PRESENT"
+    assert verification["verdict"] == "STILL_PRESENT"
+    assert verification["current_path_edges"][0]["relation"] == "CALLBACK_ENTRY"
+    assert verification["remaining_failure_evidence"][0]["evidence_snippet"] == "void unsafe_copy(void) { shared_buffer[index] = value; }"
+
+    persisted = PlatformRepository(db_path).finding(finding["id"], project["id"])
+    baseline = persisted["verification_baseline"]
+    assert baseline["path_coverage_available"] is True
+    assert any(path["entry_relation"] == "CALLBACK_ENTRY" for path in baseline["relevant_paths"])
+    assert persisted["remediation"]["verification"]["verdict"] == "STILL_PRESENT"
 
 
 def test_provider_default_review_path_snapshots_budget_and_keeps_failed_unit_unavailable(monkeypatch, tmp_path):
@@ -1123,6 +1210,7 @@ esp_err_t ota_install(void) {
     xSemaphoreGive(ota_mutex);
     return ESP_OK;
 }
+void app_main(void) { ota_install(); }
 """,
         encoding="utf-8",
     )
@@ -1155,7 +1243,7 @@ esp_err_t ota_install(void) {
             fix_calls += 1
             verdict = "STILL_PRESENT" if fix_calls == 1 else "FIXED"
             current_line = "        return err;" if verdict == "STILL_PRESENT" else "        xSemaphoreGive(ota_mutex);"
-            evidence = {"file": "src/main.c", "line": 7, "symbol": "ota_install", "evidence_snippet": current_line, "description": "Current error path evidence."}
+            evidence = {"file": "src/main.c", "line": 7, "symbol": "ota_install", "evidence_snippet": current_line, "description": "Current error path releases the acquired mutex."}
             response = {
                 "verdict": verdict,
                 "original_failure_condition": "The OTA setup error path may retain the mutex.",

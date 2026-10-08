@@ -358,6 +358,16 @@ class FindingBaselineSymbol(BaseModel):
     line_end: int = Field(ge=1)
 
 
+class FindingBaselinePath(BaseModel):
+    """One deterministically observed entry-to-finding path at creation time."""
+
+    entry_name: str = Field(min_length=1, max_length=240)
+    entry_file: str = Field(min_length=1, max_length=4000)
+    entry_relation: str = Field(min_length=1, max_length=80)
+    path_symbols: list[str] = Field(min_length=1, max_length=12)
+    edges: list[FixVerificationPathEdge] = Field(min_length=1, max_length=12)
+
+
 class FindingVerificationBaseline(BaseModel):
     """Small finding-time source/topology record, not a repository snapshot."""
 
@@ -366,6 +376,9 @@ class FindingVerificationBaseline(BaseModel):
     files: list[FindingBaselineFile] = Field(default_factory=list, max_length=8)
     symbols: list[FindingBaselineSymbol] = Field(default_factory=list, max_length=24)
     topology_edges: list[FixVerificationPathEdge] = Field(default_factory=list, max_length=48)
+    relevant_paths: list[FindingBaselinePath] = Field(default_factory=list, max_length=8)
+    topology_truncated: bool = False
+    path_coverage_available: bool = False
 
 
 class FindingRemediation(BaseModel):
@@ -462,12 +475,24 @@ class FixVerificationEvidence(BaseModel):
     description: str = Field(min_length=8, max_length=800)
 
 
+class FixPathCoverage(BaseModel):
+    """Auditable disposition of a baseline path, validated against current source."""
+
+    original_entry: str = Field(min_length=1, max_length=480)
+    original_path: list[str] = Field(max_length=12)
+    status: Literal["MITIGATED", "REMOVED", "REDIRECTED_SAFE", "STILL_UNSAFE", "UNRESOLVED"]
+    current_path_edges: list[FixVerificationPathEdge] = Field(default_factory=list, max_length=24)
+    evidence: list[FixVerificationEvidence] = Field(default_factory=list, max_length=8)
+    note: str = Field(default="", max_length=400)
+
+
 class FixVerificationResult(BaseModel):
     verdict: Literal["FIXED", "STILL_PRESENT", "INCONCLUSIVE"]
     original_failure_condition: str = Field(max_length=2000)
     original_execution_path: list[str] = Field(max_length=20)
     current_execution_path: list[str] = Field(max_length=20)
     current_path_edges: list[FixVerificationPathEdge] = Field(default_factory=list, max_length=24)
+    original_path_coverage: list[FixPathCoverage] = Field(default_factory=list, max_length=8)
     mitigations_found: list[FixVerificationEvidence] = Field(max_length=12)
     remaining_failure_evidence: list[FixVerificationEvidence] = Field(max_length=12)
     inspected_files: list[str] = Field(max_length=40)
@@ -495,6 +520,7 @@ class FixVerificationResult(BaseModel):
                 "original_execution_path": [],
                 "current_execution_path": [],
                 "current_path_edges": [],
+                "original_path_coverage": [],
                 "mitigations_found": [],
                 "remaining_failure_evidence": [],
                 "inspected_files": [],

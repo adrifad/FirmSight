@@ -26,6 +26,15 @@ refreshed indexed relations. Source snapshots and the structured verification
 report are persisted with the finding so the verdict remains inspectable. A
 missing or incomplete changed-file list does not by itself determine the verdict.
 
+Reachability may begin at a project-supported application entry, task or ISR, or
+a callback/event/timer handler that the indexer can resolve from a static
+registration. Unresolved callback pointers remain inferred and cannot prove a
+current path. Resource calls are interpreted by finding category: an event-group
+wait or unrelated queue operation does not mitigate a bounds bug, and queue use
+alone does not prove ownership isolation. For findings with a saved baseline,
+`FIXED` also accounts for each deterministically indexed original entry path;
+truncated or unresolved path coverage produces `INCONCLUSIVE`.
+
 The verifier asks whether the original failure condition is still reachable in
 current source. It may accept a different mitigation from the original
 recommendation, such as single-writer ownership and copied queue messages in

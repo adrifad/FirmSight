@@ -113,7 +113,7 @@ def test_b_single_writer_and_queue_copy_is_valid_alternative_mitigation():
     line = current_text.splitlines()[0]
     result = _result("FIXED", mitigations=[_evidence("src/main.c", 1, line, "The owner sends copied queue data.", "task_a")], alternative=True)
     checked = validate_fix_verification(result, current, symbols, finding)
-    assert checked.verdict == "FIXED"
+    assert checked.verdict == "FIXED", (checked.validation_reasons, checked.mitigations_found)
     assert checked.alternative_mitigation is True
 
 
@@ -198,7 +198,8 @@ def test_h_removed_feature_has_current_caller_evidence_for_fix():
     assert "unsafe_read" in context
     result = _result("FIXED", failure="The removed feature previously reached an unsafe shared write.", current_path=["task_worker now returns without entering the removed path."], mitigations=[_evidence("src/main.c", 2, "void task_worker(void) { return; }", "task_worker returns without calling unsafe_read.", "task_worker")])
     current_relations = [_relation("src/main.c:app_main", "src/main.c:task_worker", "src/main.c", 1, "TASK_ENTRY")]
-    assert validate_fix_verification(result, files, symbols, finding, current_relations=current_relations).verdict == "FIXED"
+    checked = validate_fix_verification(result, files, symbols, finding, current_relations=current_relations)
+    assert checked.verdict == "FIXED", checked.model_dump()
 
 
 def test_i_api_representation_change_can_break_original_invalid_length_condition():
@@ -206,8 +207,8 @@ def test_i_api_representation_change_can_break_original_invalid_length_condition
     files = [{"path": "src/buffer.c", "content": source}]
     symbols = [_symbol("bounded_view", "src/buffer.c", 1, 1)]
     result = _result("FIXED", failure="An invalid caller length previously reached the buffer copy.", current_path=["caller -> bounded_view(Span) -> copy_span uses the validated span length"], mitigations=[_evidence("src/buffer.c", 1, source, "Span carries the bounded extent into the copy operation.", "bounded_view")], alternative=True)
-    checked = validate_fix_verification(result, files, symbols, _finding(function="bounded_view", line=1))
-    assert checked.verdict == "FIXED"
+    checked = validate_fix_verification(result, files, symbols, _finding(function="bounded_view", line=1, category="MEMORY_SAFETY"))
+    assert checked.verdict == "FIXED", checked.model_dump()
     assert checked.alternative_mitigation
 
 
@@ -254,13 +255,15 @@ void unsafe_write(void) { shared_state++; }
         _relation("src/main.c:app_main", "src/main.c:task_b", "src/main.c", 1, "TASK_ENTRY"),
         _relation("src/main.c:task_a", "src/main.c:unsafe_write", "src/main.c", 2, "CALLS"),
         _relation("src/main.c:task_b", "src/main.c:unsafe_write", "src/main.c", 3, "CALLS"),
-        {**_relation("src/main.c:task_a", "shared_mutex", "src/main.c", 2, "USES_RESOURCE"), "target_symbol_id": None},
-        {**_relation("src/main.c:task_b", "shared_mutex", "src/main.c", 3, "USES_RESOURCE"), "target_symbol_id": None},
+        {**_relation("src/main.c:task_a", "xSemaphoreTake", "src/main.c", 2, "USES_RESOURCE"), "target_name": "xSemaphoreTake", "target_symbol_id": None, "metadata": {"api": "xSemaphoreTake", "operation": "LOCK", "resource": "shared_mutex"}},
+        {**_relation("src/main.c:task_a", "xSemaphoreGive", "src/main.c", 2, "USES_RESOURCE"), "target_name": "xSemaphoreGive", "target_symbol_id": None, "metadata": {"api": "xSemaphoreGive", "operation": "UNLOCK", "resource": "shared_mutex"}},
+        {**_relation("src/main.c:task_b", "xSemaphoreTake", "src/main.c", 3, "USES_RESOURCE"), "target_name": "xSemaphoreTake", "target_symbol_id": None, "metadata": {"api": "xSemaphoreTake", "operation": "LOCK", "resource": "shared_mutex"}},
+        {**_relation("src/main.c:task_b", "xSemaphoreGive", "src/main.c", 3, "USES_RESOURCE"), "target_name": "xSemaphoreGive", "target_symbol_id": None, "metadata": {"api": "xSemaphoreGive", "operation": "UNLOCK", "resource": "shared_mutex"}},
     ]
     result = _result("STILL_PRESENT", remaining=[_evidence("src/main.c", 4, "shared_state++;", "The shared_state sink remains.", "unsafe_write")])
     result = result.model_copy(update={"current_path_edges": [_path_edge("app_main", "task_a", "src/main.c", 1, "TASK_ENTRY"), _path_edge("task_a", "unsafe_write", "src/main.c", 2)]})
     checked = validate_fix_verification(result, files, symbols, _finding(file="src/main.c", function="unsafe_write", line=4), current_relations=relations)
-    assert checked.verdict == "INCONCLUSIVE"
+    assert checked.verdict == "INCONCLUSIVE", checked.model_dump()
     assert checked.validation_status == "DOWNGRADED"
 
 
@@ -350,7 +353,7 @@ def test_s_model_snippet_is_replaced_with_canonical_current_source_line():
     evidence = evidence.model_copy(update={"line": 4})
     result = _result("STILL_PRESENT", remaining=[evidence]).model_copy(update={"current_path_edges": [_path_edge("app_main", "task_a", "src/main.c", 1, "TASK_ENTRY"), _path_edge("task_a", "unsafe_read", "src/main.c", 2)]})
     checked = validate_fix_verification(result, files, symbols, _finding(file="src/main.c", function="unsafe_read", line=4), current_relations=relations)
-    assert checked.verdict == "STILL_PRESENT"
+    assert checked.verdict == "STILL_PRESENT", checked.validation_reasons
     assert checked.remaining_failure_evidence[0].evidence_snippet == "shared_state ++;"
 
 
@@ -393,4 +396,409 @@ def test_w_removed_path_requires_resolved_original_callers_and_removal_evidence(
     symbols = [_symbol("app_main", "src/main.c", 1, 1), _symbol("task_a", "src/main.c", 2, 2)]
     relations = [_relation("src/main.c:app_main", "src/main.c:task_a", "src/main.c", 1, "TASK_ENTRY")]
     result = _result("FIXED", failure="task_a previously reached a shared_state write.", mitigations=[_evidence("src/main.c", 2, "void task_a(void) { return; }", "The task_a path now returns and no longer calls unsafe_read.", "task_a")])
-    assert validate_fix_verification(result, files, symbols, finding, current_relations=relations).verdict == "FIXED"
+    checked = validate_fix_verification(result, files, symbols, finding, current_relations=relations)
+    assert checked.verdict == "FIXED", checked.model_dump()
+
+
+def _indexed_edge(relation, symbols):
+    by_id = {item["id"]: item for item in symbols}
+    source = by_id[str(relation.get("source_symbol_id") or "")]
+    target = by_id.get(str(relation.get("target_symbol_id") or ""))
+    return FixVerificationPathEdge(
+        source=source["name"], relation=relation["relation_kind"], target=(target or {}).get("name") or relation.get("target_name"),
+        file=relation["file"], line=relation["line"], relation_state=relation["relation_state"],
+        source_id=source["id"], target_id=(target or {}).get("id"),
+    )
+
+
+def _indexed_path_to(result, target_name):
+    from collections import deque
+
+    by_id = {item["id"]: item for item in result.symbols}
+    targets = [item["id"] for item in result.symbols if item["kind"] == "function" and item["name"] == target_name]
+    assert len(targets) == 1
+    graph = {}
+    entries = []
+    for relation in result.relations:
+        if relation["relation_state"] != "OBSERVED":
+            continue
+        kind = relation["relation_kind"]
+        if kind in {"APP_ENTRY", "TASK_ENTRY", "ISR_ENTRY", "CALLBACK_ENTRY", "EVENT_HANDLER_ENTRY", "TIMER_ENTRY", "REGISTERED_HANDLER"}:
+            entries.append(relation)
+        elif kind in {"CALL", "CALLS"}:
+            graph.setdefault(relation["source_symbol_id"], []).append(relation)
+    queue = deque(([entry], str(entry.get("target_symbol_id"))) for entry in entries)
+    while queue:
+        path, node = queue.popleft()
+        if node == targets[0]:
+            return [_indexed_edge(item, result.symbols) for item in path]
+        for relation in graph.get(node, []):
+            queue.append(([*path, relation], str(relation.get("target_symbol_id"))))
+    raise AssertionError(f"no indexed observed firmware path reaches {target_name}")
+
+
+def _indexed_state(source, finding_function="unsafe_copy", category="MEMORY_SAFETY", finding_line=3):
+    from app.indexer import FirmwareIndexer
+
+    files = [{"path": "src/main.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-VERIFY-V5")
+    finding = _finding(file="src/main.c", function=finding_function, line=finding_line, category=category)
+    return files, indexed, finding
+
+
+def _still_result(files, indexed, finding, target_function, sink_line, description="The current unsafe operation remains reachable."):
+    result = _result("STILL_PRESENT", remaining=[_evidence("src/main.c", sink_line, files[0]["content"].splitlines()[sink_line - 1], description, target_function)])
+    return result.model_copy(update={"current_path_edges": _indexed_path_to(indexed, target_function)})
+
+
+def test_x_app_main_is_an_observed_firmware_entry_for_still_present():
+    source = '#include "esp_err.h"\nvoid unsafe_copy(void) {\n  shared_buffer[index] = value;\n}\nesp_err_t app_main(void) { unsafe_copy(); return 0; }\n'
+    files, indexed, finding = _indexed_state(source, finding_line=3)
+    assert any(item["relation_kind"] == "APP_ENTRY" and item["relation_state"] == "OBSERVED" for item in indexed.relations)
+    checked = validate_fix_verification(_still_result(files, indexed, finding, "unsafe_copy", 3), files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT", checked.validation_reasons
+
+
+def test_app_main_name_alone_does_not_establish_esp_idf_entry():
+    from app.indexer import FirmwareIndexer
+
+    source = "void unsafe_copy(void) { shared_buffer[index] = value; }\nvoid app_main(void) { unsafe_copy(); }\n"
+    indexed = FirmwareIndexer().index([{"path": "src/main.c", "content": source}], project_id="FS-APP-NAME-ONLY")
+    assert not any(item["relation_kind"] == "APP_ENTRY" for item in indexed.relations)
+
+
+def test_y_mqtt_callback_registration_is_an_observed_entry_path():
+    source = """void unsafe_copy(void) { shared_buffer[index] = value; }
+void parse_payload(void) { unsafe_copy(); }
+void mqtt_event_handler(void) { parse_payload(); }
+void register_mqtt(void) { esp_mqtt_client_register_event(client, event, mqtt_event_handler, NULL); }
+"""
+    files, indexed, finding = _indexed_state(source, finding_line=1)
+    entries = [item for item in indexed.relations if item["relation_kind"] == "CALLBACK_ENTRY"]
+    assert len(entries) == 1 and entries[0]["relation_state"] == "OBSERVED"
+    assert entries[0]["target_symbol_id"] == next(item["id"] for item in indexed.symbols if item["name"] == "mqtt_event_handler")
+    result = _still_result(files, indexed, finding, "unsafe_copy", 1)
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT"
+    assert checked.current_path_edges[0].relation == "CALLBACK_ENTRY"
+
+
+def test_z_http_handler_is_observed_only_from_static_registered_initializer():
+    source = """httpd_uri_t uri = { .uri = "/", .handler = request_handler };
+void unsafe_copy(void) { shared_buffer[index] = value; }
+void parse_request(void) { unsafe_copy(); }
+void request_handler(void) { parse_request(); }
+void start_http(void) { httpd_register_uri_handler(server, &uri); }
+"""
+    from app.indexer import FirmwareIndexer
+
+    indexed = FirmwareIndexer().index([{"path": "src/http.c", "content": source}], project_id="FS-HTTP")
+    entries = [item for item in indexed.relations if item["relation_kind"] == "REGISTERED_HANDLER"]
+    assert len(entries) == 1 and entries[0]["relation_state"] == "OBSERVED"
+    assert entries[0]["target_name"] is None
+    files = [{"path": "src/http.c", "content": source}]
+    finding = _finding(file="src/http.c", function="unsafe_copy", line=2, category="MEMORY_SAFETY")
+    current = _result("STILL_PRESENT", remaining=[_evidence("src/http.c", 2, "void unsafe_copy(void) { shared_buffer[index] = value; }", "The current shared buffer write remains.", "unsafe_copy")])
+    current = current.model_copy(update={"current_path_edges": _indexed_path_to(indexed, "unsafe_copy")})
+    checked = validate_fix_verification(current, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT"
+
+
+def test_callback_struct_initializer_in_another_function_is_not_reused_as_registration_evidence():
+    from app.indexer import FirmwareIndexer
+
+    source = """void timer_callback(void) { unsafe_copy(); }
+void local_setup(void) { esp_timer_create_args_t args = { .callback = timer_callback }; }
+void later_start(void) { esp_timer_create(&args, &timer); }
+void unsafe_copy(void) { shared_buffer[index] = value; }
+"""
+    indexed = FirmwareIndexer().index([{"path": "src/timer.c", "content": source}], project_id="FS-TIMER-SCOPE")
+
+    assert not any(item["relation_kind"] == "TIMER_ENTRY" for item in indexed.relations)
+
+
+def test_aa_unresolved_callback_registration_cannot_ground_still_present():
+    source = """void unsafe_copy(void) { shared_buffer[index] = value; }
+void mqtt_event_handler(void) { unsafe_copy(); }
+void register_mqtt(void) { esp_mqtt_client_register_event(client, event, callback_pointer, NULL); }
+"""
+    files, indexed, finding = _indexed_state(source, finding_line=1)
+    registration = next(item for item in indexed.relations if item["relation_kind"] == "CALLBACK_ENTRY")
+    assert registration["relation_state"] == "INFERRED"
+    claimed = _result("STILL_PRESENT", remaining=[_evidence("src/main.c", 1, files[0]["content"].splitlines()[0], "The current sink is reachable.", "unsafe_copy")])
+    sink_id = next(item["id"] for item in indexed.symbols if item["name"] == "unsafe_copy")
+    calls = [item for item in indexed.relations if item["relation_kind"] in {"CALL", "CALLS"} and item["relation_state"] == "OBSERVED"]
+    call_graph = {}
+    for item in calls:
+        call_graph.setdefault(item["source_symbol_id"], []).append(item)
+    handler_id = next(item["id"] for item in indexed.symbols if item["name"] == "mqtt_event_handler")
+    handler_call = next(item for item in call_graph[handler_id] if item["target_symbol_id"])
+    assert handler_call["target_symbol_id"] == sink_id
+    claimed = claimed.model_copy(update={"current_path_edges": [_indexed_edge(registration, indexed.symbols), _indexed_edge(handler_call, indexed.symbols)]})
+    checked = validate_fix_verification(claimed, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "INCONCLUSIVE"
+
+
+def test_ab_unrelated_event_group_does_not_weaken_bounds_failure():
+    source = """#include <esp_err.h>
+void unsafe_copy(void) {
+    xEventGroupWaitBits(events, READY, pdFALSE, pdTRUE, portMAX_DELAY);
+    shared_buffer[index] = input;
+}
+void app_main(void) { unsafe_copy(); }
+"""
+    files, indexed, finding = _indexed_state(source, finding_line=4)
+    result = _still_result(files, indexed, finding, "unsafe_copy", 4, "The indexed write uses an unchecked index.")
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT", checked.validation_reasons
+
+
+def test_ac_unrelated_mutex_does_not_mitigate_bounds_failure():
+    source = """#include <esp_err.h>
+void unsafe_copy(void) {
+    xSemaphoreTake(logging_mutex, portMAX_DELAY);
+    shared_buffer[index] = input;
+    xSemaphoreGive(logging_mutex);
+}
+void app_main(void) { unsafe_copy(); }
+"""
+    files, indexed, finding = _indexed_state(source, finding_line=4)
+    result = _still_result(files, indexed, finding, "unsafe_copy", 4, "The indexed write uses an unchecked index.")
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT", checked.validation_reasons
+
+
+def _race_before_source():
+    return """void app_main(void) {
+    xTaskCreate(task_a, "a", 1024, 0, 1, 0);
+    xTaskCreate(task_b, "b", 1024, 0, 1, 0);
+}
+void task_a(void) { unsafe_write(); }
+void task_b(void) { unsafe_write(); }
+void unsafe_write(void) { shared_state++; }
+"""
+
+
+def _race_finding_with_baseline(source):
+    from app.fix_verification import capture_finding_baseline
+    from app.indexer import FirmwareIndexer
+
+    files = [{"path": "src/race.c", "content": source}]
+    indexer = FirmwareIndexer()
+    indexed = indexer.index(files, project_id="FS-RACE-V5")
+    finding = _finding(file="src/race.c", function="unsafe_write", line=7, category="CONCURRENCY")
+    baseline = capture_finding_baseline(
+        finding, [{**files[0], "content_hash": indexer.digest(source)}], indexed.symbols, indexed.relations,
+        source_snapshot_hash=indexer.digest(source), topology_fingerprint=indexed.relation_fingerprint,
+    )
+    return finding.model_copy(update={"verification_baseline": baseline}), files, indexed
+
+
+def _race_current_source(protected_tasks):
+    lines = [
+        "void app_main(void) {",
+        '    xTaskCreate(task_a, "a", 1024, 0, 1, 0);',
+        '    xTaskCreate(task_b, "b", 1024, 0, 1, 0);',
+        "}",
+    ]
+    for task in ("task_a", "task_b"):
+        lines.append(f"void {task}(void) {{")
+        if task in protected_tasks:
+            lines.append("    xSemaphoreTake(shared_state_mutex, portMAX_DELAY);")
+        lines.append("    unsafe_write();")
+        if task in protected_tasks:
+            lines.append("    xSemaphoreGive(shared_state_mutex);")
+        lines.append("}")
+    lines.append("void unsafe_write(void) { shared_state++; }")
+    return "\n".join(lines) + "\n"
+
+
+def test_ad_matching_mutex_blocks_sink_only_still_present():
+    from app.indexer import FirmwareIndexer
+
+    source = _race_current_source({"task_a", "task_b"})
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-RACE-MUTEX")
+    finding = _finding(file="src/race.c", function="unsafe_write", line=15, category="CONCURRENCY")
+    result = _result("STILL_PRESENT", remaining=[_evidence("src/race.c", 15, "shared_state++;", "The shared_state write remains.", "unsafe_write")]).model_copy(update={"current_path_edges": _indexed_path_to(indexed, "unsafe_write")})
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "INCONCLUSIVE"
+
+
+def test_ae_one_fixed_and_one_unprotected_baseline_path_is_not_fixed():
+    from app.indexer import FirmwareIndexer
+
+    finding, _, _ = _race_finding_with_baseline(_race_before_source())
+    source = _race_current_source({"task_a"})
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-RACE-PARTIAL")
+    result = _result("FIXED", failure="Two tasks previously wrote shared_state without synchronization.", mitigations=[_evidence("src/race.c", 6, "    xSemaphoreTake(shared_state_mutex, portMAX_DELAY);", "task_a now takes the shared_state mutex.", "task_a")])
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict != "FIXED"
+    assert {item.status for item in checked.original_path_coverage} == {"MITIGATED", "STILL_UNSAFE"}
+
+
+def test_af_all_baseline_callers_with_same_mutex_can_be_fixed():
+    from app.indexer import FirmwareIndexer
+
+    finding, _, _ = _race_finding_with_baseline(_race_before_source())
+    source = _race_current_source({"task_a", "task_b"})
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-RACE-FULL")
+    result = _result("FIXED", failure="Two tasks previously wrote shared_state without synchronization.", mitigations=[_evidence("src/race.c", 6, "    xSemaphoreTake(shared_state_mutex, portMAX_DELAY);", "task_a and task_b now use the same shared_state mutex.", "task_a")])
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "FIXED", checked.validation_reasons
+    assert len(checked.original_path_coverage) == 2
+    assert {item.status for item in checked.original_path_coverage} == {"MITIGATED"}
+
+
+def test_ag_unrelated_queue_receive_does_not_mitigate_shared_state_race():
+    source = """void unsafe_write(void) { shared_state++; }
+void task_a(void) { xQueueReceive(command_queue, &command, portMAX_DELAY); unsafe_write(); }
+void app_main(void) { xTaskCreate(task_a, "a", 1024, 0, 1, 0); }
+"""
+    files, indexed, finding = _indexed_state(source, "unsafe_write", "CONCURRENCY", 1)
+    result = _still_result(files, indexed, finding, "unsafe_write", 1)
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "STILL_PRESENT"
+
+
+def test_ah_queue_copy_isolation_accounts_for_an_original_writer_path():
+    from app.indexer import FirmwareIndexer
+
+    finding, _, _ = _race_finding_with_baseline(_race_before_source())
+    source = """void app_main(void) {
+    xTaskCreate(task_a, "a", 1024, 0, 1, 0);
+    xTaskCreate(task_b, "b", 1024, 0, 1, 0);
+}
+void task_a(void) { unsafe_write(); }
+void task_b(void) { QueueMessage copy; xQueueReceive(state_queue, &copy, portMAX_DELAY); consume(copy); }
+void unsafe_write(void) { shared_state++; }
+"""
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-RACE-QUEUE")
+    result = _result("FIXED", failure="Two tasks previously wrote shared_state without synchronization.", mitigations=[_evidence("src/race.c", 6, "void task_b(void) { QueueMessage copy; xQueueReceive(state_queue, &copy, portMAX_DELAY); consume(copy); }", "task_b now consumes a copied queue message and no longer mutates shared_state.", "task_b")], alternative=True)
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "FIXED", checked.validation_reasons
+    assert {item.status for item in checked.original_path_coverage} == {"MITIGATED", "REDIRECTED_SAFE"}
+
+
+def test_ak_callback_named_function_without_registration_is_not_entry():
+    from app.indexer import FirmwareIndexer
+
+    source = "void mqtt_event_handler(void) { handle_event(); }\nvoid handle_event(void) {}\n"
+    indexed = FirmwareIndexer().index([{"path": "src/main.c", "content": source}], project_id="FS-NO-CALLBACK")
+    assert not any(item["relation_kind"] in {"CALLBACK_ENTRY", "EVENT_HANDLER_ENTRY", "REGISTERED_HANDLER"} for item in indexed.relations)
+
+
+def test_ai_three_original_paths_are_accounted_for_when_two_are_removed_and_one_is_locked():
+    from app.fix_verification import capture_finding_baseline
+    from app.indexer import FirmwareIndexer
+
+    before = """void app_main(void) {
+    xTaskCreate(task_a, "a", 1024, 0, 1, 0);
+    xTaskCreate(task_b, "b", 1024, 0, 1, 0);
+    xTaskCreate(task_c, "c", 1024, 0, 1, 0);
+}
+void task_a(void) { unsafe_write(); }
+void task_b(void) { unsafe_write(); }
+void task_c(void) { unsafe_write(); }
+void unsafe_write(void) { shared_state++; }
+"""
+    source = """void app_main(void) {
+    xTaskCreate(task_a, "a", 1024, 0, 1, 0);
+    xTaskCreate(task_b, "b", 1024, 0, 1, 0);
+    xTaskCreate(task_c, "c", 1024, 0, 1, 0);
+}
+void task_a(void) { return; }
+void task_b(void) { return; }
+void task_c(void) {
+    xSemaphoreTake(shared_state_mutex, portMAX_DELAY);
+    unsafe_write();
+    xSemaphoreGive(shared_state_mutex);
+}
+void unsafe_write(void) { shared_state++; }
+"""
+    indexer = FirmwareIndexer()
+    old_files = [{"path": "src/race.c", "content": before, "content_hash": indexer.digest(before)}]
+    old_index = indexer.index(old_files, project_id="FS-THREE-PATHS")
+    finding = _finding(file="src/race.c", function="unsafe_write", line=10, category="CONCURRENCY")
+    baseline = capture_finding_baseline(
+        finding, old_files, old_index.symbols, old_index.relations,
+        source_snapshot_hash=indexer.digest(before), topology_fingerprint=old_index.relation_fingerprint,
+    )
+    finding = finding.model_copy(update={"verification_baseline": baseline})
+    files = [{"path": "src/race.c", "content": source}]
+    current_index = indexer.index(files, project_id="FS-THREE-PATHS")
+    result = _result(
+        "FIXED", failure="Three task paths previously wrote shared_state without synchronization.",
+        mitigations=[
+            _evidence("src/race.c", 6, "void task_a(void) { return; }", "task_a no longer calls unsafe_write; its path returns.", "task_a"),
+            _evidence("src/race.c", 7, "void task_b(void) { return; }", "task_b no longer calls unsafe_write; its path returns.", "task_b"),
+            _evidence("src/race.c", 9, "    xSemaphoreTake(shared_state_mutex, portMAX_DELAY);", "task_c uses the mutex protecting shared_state.", "task_c"),
+        ],
+    )
+    checked = validate_fix_verification(result, files, current_index.symbols, finding, current_relations=current_index.relations)
+    assert checked.verdict == "FIXED", checked.validation_reasons
+    assert len(checked.original_path_coverage) == 3
+    assert {item.status for item in checked.original_path_coverage} == {"MITIGATED", "REDIRECTED_SAFE"}
+
+
+def test_aj_unresolved_original_entry_caller_prevents_fixed_verdict():
+    finding, _, _ = _race_finding_with_baseline(_race_before_source())
+    source = """void app_main(void) {
+    xTaskCreate(task_a, "a", 1024, 0, 1, 0);
+}
+void task_a(void) { return; }
+void unsafe_write(void) { shared_state++; }
+"""
+    from app.indexer import FirmwareIndexer
+
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-RACE-V5")
+    result = _result("FIXED", failure="Both original task paths no longer reach the unsafe operation.", mitigations=[_evidence("src/race.c", 5, "void task_a(void) { return; }", "task_a no longer calls unsafe_write.", "task_a")])
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+    assert checked.verdict == "INCONCLUSIVE"
+    assert any(item.status == "UNRESOLVED" for item in checked.original_path_coverage)
+
+
+def test_al_unrelated_mutex_does_not_mitigate_concurrency_invariant():
+    from app.indexer import FirmwareIndexer
+
+    source = """void unsafe_write(void) { shared_state++; }
+void task_a(void) {
+    xSemaphoreTake(logging_mutex, portMAX_DELAY);
+    unsafe_write();
+    xSemaphoreGive(logging_mutex);
+}
+void app_main(void) { xTaskCreate(task_a, "a", 1024, 0, 1, 0); }
+"""
+    files = [{"path": "src/race.c", "content": source}]
+    indexed = FirmwareIndexer().index(files, project_id="FS-UNRELATED-LOCK")
+    finding = _finding(file="src/race.c", function="unsafe_write", line=1, category="CONCURRENCY")
+    evidence = _evidence("src/race.c", 1, "void unsafe_write(void) { shared_state++; }", "The unsynchronized shared_state write remains reachable.", "unsafe_write")
+    result = _result("STILL_PRESENT", remaining=[evidence]).model_copy(update={"current_path_edges": _indexed_path_to(indexed, "unsafe_write")})
+
+    checked = validate_fix_verification(result, files, indexed.symbols, finding, current_relations=indexed.relations)
+
+    assert checked.verdict == "STILL_PRESENT"
+
+
+def test_am_resource_relations_retain_api_operation_and_resource_identity():
+    from app.indexer import FirmwareIndexer
+
+    source = """void guarded(void) {
+    xSemaphoreTake(shared_mutex, portMAX_DELAY);
+    unsafe_write();
+    xSemaphoreGive(shared_mutex);
+}
+void unsafe_write(void) { shared_state++; }
+"""
+    indexed = FirmwareIndexer().index([{"path": "src/race.c", "content": source}], project_id="FS-RESOURCE-META")
+    operations = [item for item in indexed.relations if item["relation_kind"] == "USES_RESOURCE"]
+
+    assert [(item["metadata"]["api"], item["metadata"]["operation"], item["metadata"]["resource"]) for item in operations] == [
+        ("xSemaphoreTake", "LOCK", "shared_mutex"),
+        ("xSemaphoreGive", "UNLOCK", "shared_mutex"),
+    ]
+    assert [item["line"] for item in operations] == [2, 4]
