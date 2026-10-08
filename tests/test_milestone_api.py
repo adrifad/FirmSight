@@ -939,6 +939,58 @@ esp_err_t ota_install(void) {
     assert "xSemaphoreGive(ota_mutex);\n        return err" in refreshed.json()["content"]
 
 
+def test_verify_fix_keeps_finding_time_baseline_after_manual_sync(tmp_path):
+    class ContextCaptureProvider(FixtureProvider):
+        def __init__(self):
+            super().__init__(source_path="src/main.c")
+            self.fix_context = ""
+
+        def chat(self, system_prompt: str, user_prompt: str) -> str:
+            if "Fix Verifier" in system_prompt:
+                self.fix_context = user_prompt
+            return super().chat(system_prompt, user_prompt)
+
+    import_root = tmp_path / "firmware-workspace"
+    project_directory = import_root / "ota-device"
+    source_directory = project_directory / "src"
+    source_directory.mkdir(parents=True)
+    source_path = source_directory / "main.c"
+    source_a = """#include <freertos/semphr.h>
+static SemaphoreHandle_t ota_mutex;
+esp_err_t ota_install(void) {
+    xSemaphoreTake(ota_mutex, portMAX_DELAY);
+    esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    xSemaphoreGive(ota_mutex);
+    return ESP_OK;
+}
+"""
+    source_b = source_a.replace("esp_ota_begin(NULL,", "esp_ota_begin(sync_state_b,")
+    source_c = source_a.replace("        return err;", "        xSemaphoreGive(ota_mutex);\n        return err;")
+    source_path.write_text(source_a, encoding="utf-8")
+    provider = ContextCaptureProvider()
+    api = TestClient(create_app(str(tmp_path / "firmsight-baseline.db"), str(import_root), provider_resolver=lambda _role: provider))
+    project = api.post("/api/projects/import-directory", json={"directory": str(project_directory)}).json()
+    api.post(f"/api/projects/{project['id']}/reviews", json={"focus": ["ota"]})
+    finding = api.get(f"/api/projects/{project['id']}/findings").json()[0]
+    api.patch(f"/api/projects/{project['id']}/findings/{finding['id']}/decision", json={"decision": "ACCEPTED"})
+
+    # The indexed pre-refresh state is now B; the finding's saved baseline is A.
+    source_path.write_text(source_b, encoding="utf-8")
+    synced = api.post(f"/api/projects/{project['id']}/sync-source")
+    assert synced.status_code == 200, synced.text
+    source_path.write_text(source_c, encoding="utf-8")
+    verified = api.post(f"/api/projects/{project['id']}/findings/{finding['id']}/verify-fix")
+
+    assert verified.status_code == 200, verified.text
+    assert "ORIGINAL FINDING BASELINE SOURCE" in provider.fix_context
+    assert "esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL)" in provider.fix_context
+    assert "esp_ota_begin(sync_state_b, OTA_SIZE_UNKNOWN, NULL)" in provider.fix_context
+    assert verified.json()["remediation"]["verification"]["verdict"] == "FIXED"
+
+
 def test_verify_fix_checks_current_source_even_when_indexed_changed_file_list_is_empty(tmp_path):
     import_root = tmp_path / "firmware-workspace"
     project_directory = import_root / "ota-device"
@@ -972,8 +1024,10 @@ esp_err_t ota_install(void) {
     assert verified.status_code == 200, verified.text
     payload = verified.json()
     assert payload["remediation"]["changed_files"] == []
-    assert payload["remediation"]["status"] == "STILL_PRESENT"
-    assert payload["remediation"]["verification"]["remaining_failure_evidence"]
+    # The function has a suspicious current line, but this fixture has no
+    # indexed caller/task entry proving it remains reachable.
+    assert payload["remediation"]["status"] == "INCONCLUSIVE"
+    assert payload["remediation"]["verification"]["remaining_failure_evidence"] == []
 
 
 def test_provider_default_review_path_snapshots_budget_and_keeps_failed_unit_unavailable(monkeypatch, tmp_path):

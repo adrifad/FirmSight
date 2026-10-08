@@ -18,7 +18,7 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 
 from .ai_provider import AIProvider, ProviderEvent, structured_response
-from .fix_verification import build_differential_context, validate_fix_verification
+from .fix_verification import build_differential_context, capture_finding_baseline, validate_fix_verification
 from .i18n import message as msg
 from .i18n import normalize_locale
 from .platform_repository import PlatformRepository
@@ -977,6 +977,9 @@ class ReviewService:
         execution["current_units"] = []
         execution["phase"] = "FINALIZING"
         self.repository.update_review(review_id, status="RUNNING", progress=progress, execution_progress=execution)
+        finding_source_symbols = self.repository.list_indexed_symbols(review.project_id)
+        finding_source_relations = self.repository.list_source_relations(review.project_id)
+        finding_topology_snapshot = self.repository.topology_snapshot(review.project_id) or {}
         for batch_number in sorted(batch_states):
             batch, candidates, _ = investigator_results[batch_number]
             batch_verifications: list[VerifierResult] = []
@@ -1000,8 +1003,9 @@ class ReviewService:
                 if verification.verdict != "SURVIVES":
                     progress.append(self._t("review.verifier_rejected", candidate=candidate_number, number=batch_number, title=candidate.title))
                     continue
+                finding_id = self._next_finding_id(review.project_id)
                 finding = FindingRead.model_validate({
-                    "id": self._next_finding_id(review.project_id), "project_id": review.project_id, "review_id": review_id,
+                    "id": finding_id, "project_id": review.project_id, "review_id": review_id,
                     **candidate.model_dump(mode="json"),
                     # REQ-2: persist a normalized title so references are stable.
                     "title": self._normalize_title(candidate.title),
@@ -1011,7 +1015,19 @@ class ReviewService:
                     "lifetime_evidence": self._finding_lifetime(review.project_id, candidate),
                     "decision": FindingDecision.UNREVIEWED, "decision_reason": None, "resolution": FindingResolution.OPEN, "resolved_at": None, "created_at": datetime.now(UTC),
                 })
+                finding = finding.model_copy(update={
+                    "verification_baseline": capture_finding_baseline(
+                        finding,
+                        raw_files,
+                        finding_source_symbols,
+                        finding_source_relations,
+                        source_snapshot_hash=current_snapshot_hash,
+                        topology_fingerprint=finding_topology_snapshot.get("relation_fingerprint"),
+                    )
+                })
                 payload = finding.model_dump(mode="json", exclude={"id", "project_id", "review_id", "decision", "decision_reason", "resolution", "resolved_at", "remediation", "created_at"})
+                if finding.verification_baseline is not None:
+                    payload["verification_baseline"] = finding.verification_baseline.model_dump(mode="json")
                 self.repository.create_finding({"id": finding.id, "project_id": review.project_id, "review_id": review_id, "payload": payload, "decision": finding.decision, "decision_reason": None, "resolution": finding.resolution, "resolved_at": None, "created_at": now()})
                 persisted += 1
                 progress.append(self._t("review.created_finding", count=persisted, title=candidate.title))
@@ -1507,11 +1523,17 @@ class ReviewService:
                         baseline_relations=baseline_relations, current_relations=current_relations,
                         baseline_allocations=baseline_allocations, current_allocations=current_allocations,
                         project_id=project_id,
+                        finding_baseline=finding.verification_baseline,
                     ),
                     operation=operation,
                     on_event=self._diagnostic_sink(review_id, role="fix-verifier", batch_number=index, total_batches=len(findings), file_count=1),
                 )
-                result = validate_fix_verification(result, raw_files, current_symbols, finding)
+                result = result.model_copy(update={
+                    "finding_baseline_snapshot_hash": finding.verification_baseline.source_snapshot_hash if finding.verification_baseline else None,
+                    "pre_refresh_snapshot_hash": ProjectService.snapshot_hash(baseline_files),
+                    "current_snapshot_hash": ProjectService.snapshot_hash(raw_files),
+                })
+                result = validate_fix_verification(result, raw_files, current_symbols, finding, current_relations=current_relations)
             except RuntimeError as error:
                 progress.append(self._t("review.recheck_error", title=finding.title, detail=error))
                 self.repository.update_review(review_id, status="RUNNING", progress=progress)
@@ -1891,10 +1913,16 @@ class ReviewService:
                     baseline_relations=before_relations, current_relations=current_relations,
                     baseline_allocations=before_allocations, current_allocations=current_allocations,
                     project_id=project_id,
+                    finding_baseline=finding.verification_baseline,
                 ),
                 operation=f"verify-fix:{project_id}:{finding_id}",
             )
-            result = validate_fix_verification(result, current_files, current_symbols, finding)
+            result = result.model_copy(update={
+                "finding_baseline_snapshot_hash": finding.verification_baseline.source_snapshot_hash if finding.verification_baseline else None,
+                "pre_refresh_snapshot_hash": ProjectService.snapshot_hash(before_files),
+                "current_snapshot_hash": ProjectService.snapshot_hash(current_files),
+            })
+            result = validate_fix_verification(result, current_files, current_symbols, finding, current_relations=current_relations)
         except RuntimeError as error:
             raise self._error(status.HTTP_502_BAD_GATEWAY, "error.fix_no_verifier_result") from error
 
@@ -1942,6 +1970,7 @@ class ReviewService:
         baseline_allocations: list[dict[str, object]] | None = None,
         current_allocations: list[dict[str, object]] | None = None,
         project_id: str | None = None,
+        finding_baseline=None,
     ) -> str:
         if current_files is None:
             current_files = before_files
@@ -1983,6 +2012,7 @@ class ReviewService:
             before_relations=baseline_relations, current_relations=current_relations,
             before_allocations=baseline_allocations, current_allocations=current_allocations,
             project_intelligence=intelligence, lifetime_facts=lifetime,
+            finding_baseline=finding_baseline or finding.verification_baseline,
             max_chars=self.MAX_REREVIEW_CONTEXT_CHARS,
         )
 

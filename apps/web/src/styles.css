@@ -846,6 +846,12 @@ dd { margin: 4px 0 0; color: var(--text-primary); font-size: 13px; font-weight: 
 .fix-report { display: grid; gap: 13px; min-width: 0; padding: 10px 0 2px; }
 .fix-report-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .fix-report-heading > strong { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.fix-report-validation { display: grid; gap: 4px; border-left: 2px solid var(--warning-border); padding: 7px 10px; background: var(--warning-soft); color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.fix-report-validation strong { color: var(--warning-text); }
+.fix-report-path { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.fix-report-path li { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; color: var(--text-tertiary); font-size: 11px; }
+.fix-report-path code { color: var(--text-primary); font-family: var(--font-mono); font-size: 10px; }
+.fix-report-path small { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 9px; }
 .fix-report-summary, .fix-report-group p { max-width: 76ch; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .fix-report-group { display: grid; gap: 7px; min-width: 0; }
 .fix-report-group > strong { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }

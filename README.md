@@ -21,19 +21,21 @@ Fix Verification is an evidence-based, differential, source-authoritative,
 topology-aware check for an accepted CONFIRMED_BUG. It compares the finding
 and indexed baseline source with freshly indexed current source, a bounded
 source diff, current callers/callees and resource relations, and only relevant
-Project Intelligence. Source snapshots and the structured verification report
-are persisted with the finding so the verdict remains inspectable. A missing or
-incomplete changed-file list does not by itself determine the verdict.
+Project Intelligence. Structured current-path edges are validated against
+refreshed indexed relations. Source snapshots and the structured verification
+report are persisted with the finding so the verdict remains inspectable. A
+missing or incomplete changed-file list does not by itself determine the verdict.
 
 The verifier asks whether the original failure condition is still reachable in
 current source. It may accept a different mitigation from the original
 recommendation, such as single-writer ownership and copied queue messages in
 place of a mutex. FIXED means the original failure condition is no longer
 supported by current source evidence. It does not mean the developer followed
-FirmSight's recommendation literally. STILL_PRESENT requires concrete
-current file/line evidence and a reachable current failure path. When the
-relevant path, topology, or source mapping cannot be established, the result is
-INCONCLUSIVE.
+FirmSight's recommendation literally. For STILL_PRESENT, FirmSight validates
+structured current-path edges against refreshed indexed relations; historical
+topology, a suspicious sink, or a narrative path cannot establish reachability.
+When the relevant path, topology, mitigation coverage, or source mapping cannot
+be established, the result is INCONCLUSIVE.
 
 ## Run the full stack
 

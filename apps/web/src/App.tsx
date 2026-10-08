@@ -320,15 +320,20 @@ function FixVerificationDetails({ remediation }: { remediation: Finding['remedia
   const evidenceList = (title: string, items: FixVerificationEvidence[]) => <div className="fix-report-group"><strong>{title}</strong>{items.length ? <ul className="fix-report-evidence">{items.map((item, index) => <li key={`${item.file}:${item.line}:${index}`}><code>{item.file}:{item.line}</code><span>{item.description}{item.evidence_snippet && <small>{item.evidence_snippet}</small>}</span></li>)}</ul> : <p>None reported.</p>}</div>
   return <div className="fix-report">
     <div className="fix-report-heading"><RemediationBadge remediation={remediation} /><strong>{Math.round(report.confidence * 100)}% confidence</strong></div>
+    {report.validation_status === 'DOWNGRADED' && <div className="fix-report-validation"><strong>AI proposed: {report.model_verdict ?? 'unknown'} · FirmSight validated: {report.verdict}</strong><span>{report.validation_reasons?.[0] ?? 'Current evidence did not satisfy the verdict requirements.'}</span></div>}
     <p className="fix-report-summary">{report.reasoning_summary || remediation.notes}</p>
     {report.original_failure_condition && <div className="fix-report-group"><strong>Original failure condition</strong><p>{report.original_failure_condition}</p></div>}
     {report.original_execution_path.length > 0 && <div className="fix-report-group"><strong>Original execution path</strong><ol className="execution">{report.original_execution_path.map((step, index) => <li key={`${step}:${index}`}>{step}</li>)}</ol></div>}
     {report.alternative_mitigation && <p className="fix-report-alternative">Alternative mitigation accepted</p>}
     {evidenceList('Mitigation found', report.mitigations_found)}
     {report.current_execution_path.length > 0 && <div className="fix-report-group"><strong>Current execution path</strong><ol className="execution">{report.current_execution_path.map((step, index) => <li key={`${step}:${index}`}>{step}</li>)}</ol></div>}
+    {report.current_path_edges.length > 0 && <div className="fix-report-group"><strong>Current verified path</strong><ul className="fix-report-path">{report.current_path_edges.map((edge, index) => <li key={`${edge.source}:${edge.relation}:${edge.target}:${index}`}><code>{edge.source}</code><span>{edge.relation}</span><code>{edge.target}</code>{edge.file && edge.line && <small>{edge.file}:{edge.line}</small>}</li>)}</ul></div>}
     {report.remaining_failure_evidence.length > 0 && evidenceList('Current failure evidence', report.remaining_failure_evidence)}
     {report.missing_context.length > 0 && <div className="fix-report-group"><strong>Missing context</strong><ul>{report.missing_context.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}</ul></div>}
     <details className="fix-report-inspected"><summary>Inspected source and snapshot identifiers</summary>
+      {report.finding_baseline_snapshot_hash && <p>Finding baseline: <code>{report.finding_baseline_snapshot_hash}</code></p>}
+      {report.pre_refresh_snapshot_hash && <p>Pre-refresh index: <code>{report.pre_refresh_snapshot_hash}</code></p>}
+      {report.current_snapshot_hash && <p>Current source: <code>{report.current_snapshot_hash}</code></p>}
       <div className="fix-report-group"><strong>Changed files</strong><ul>{remediation.changed_files.map(path => <li key={path}><code>{path}</code></li>)}</ul></div>
       <div className="fix-report-group"><strong>Inspected files</strong><ul>{report.inspected_files.map(path => <li key={path}><code>{path}</code></li>)}</ul></div>
       <div className="fix-report-group"><strong>Inspected symbols</strong><ul>{report.inspected_symbols.map(symbol => <li key={symbol}><code>{symbol}</code></li>)}</ul></div>

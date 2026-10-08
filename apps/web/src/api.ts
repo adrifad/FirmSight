@@ -2,11 +2,13 @@ export type Project = { id: string; name: string; description: string; source_ty
 export type ProjectFile = { path: string; language: string; size: number; content?: string }
 export type ProjectSourceSync = { project_id: string; file_count: number; symbol_count: number; language: string | null; framework: string | null; target: string | null; build_system: string | null; changed_files: string[] }
 export type FixVerificationEvidence = { file: string; line: number; symbol?: string | null; evidence_snippet: string; description: string }
+export type FixVerificationPathEdge = { source: string; relation: string; target: string; file?: string | null; line?: number | null; relation_state?: string | null; source_id?: string | null; target_id?: string | null }
 export type FixVerificationReport = {
   verdict: 'FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE'
   original_failure_condition: string
   original_execution_path: string[]
   current_execution_path: string[]
+  current_path_edges: FixVerificationPathEdge[]
   mitigations_found: FixVerificationEvidence[]
   remaining_failure_evidence: FixVerificationEvidence[]
   inspected_files: string[]
@@ -15,6 +17,12 @@ export type FixVerificationReport = {
   alternative_mitigation: boolean
   confidence: number
   reasoning_summary: string
+  finding_baseline_snapshot_hash?: string | null
+  pre_refresh_snapshot_hash?: string | null
+  current_snapshot_hash?: string | null
+  model_verdict?: 'FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE' | null
+  validation_status?: 'UNVALIDATED' | 'VALIDATED' | 'DOWNGRADED'
+  validation_reasons?: string[]
   notes?: string | null
 }
 export type FindingRemediation = { status: 'UNVERIFIED' | 'VERIFIED_FIXED' | 'STILL_PRESENT' | 'INCONCLUSIVE' | 'MANUALLY_MARKED'; notes: string; verified_at?: string | null; source_refreshed: boolean; changed_files: string[]; baseline_snapshot_hash?: string | null; current_snapshot_hash?: string | null; verification?: FixVerificationReport | null }

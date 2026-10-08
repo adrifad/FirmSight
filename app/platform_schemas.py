@@ -113,6 +113,8 @@ class TopologySymbolRead(BaseModel):
     signature: str = ""
     component: str | None = None
     source_hash: str
+    file_hash: str = ""
+    symbol_hash: str = ""
     confidence: float = Field(ge=0, le=1)
 
 
@@ -322,6 +324,50 @@ class FindingVerification(BaseModel):
     notes: str
 
 
+class FixVerificationPathEdge(BaseModel):
+    """A model-referenced topology edge that must be checked against the index."""
+
+    source: str = Field(min_length=1, max_length=240)
+    relation: str = Field(min_length=1, max_length=80)
+    target: str = Field(min_length=1, max_length=240)
+    file: str | None = Field(default=None, max_length=4000)
+    line: int | None = Field(default=None, ge=1)
+    relation_state: str | None = Field(default=None, max_length=40)
+    source_id: str | None = Field(default=None, max_length=128)
+    target_id: str | None = Field(default=None, max_length=128)
+
+
+class FindingBaselineFile(BaseModel):
+    file: str = Field(min_length=1, max_length=4000)
+    content_hash: str = Field(min_length=8, max_length=128)
+    line_start: int = Field(ge=1)
+    excerpt: str = Field(max_length=8000)
+    symbol_name: str | None = Field(default=None, max_length=240)
+    signature: str | None = Field(default=None, max_length=1200)
+    symbol_hash: str | None = Field(default=None, max_length=128)
+
+
+class FindingBaselineSymbol(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=240)
+    file: str = Field(min_length=1, max_length=4000)
+    signature: str = Field(default="", max_length=1200)
+    symbol_hash: str | None = Field(default=None, max_length=128)
+    component: str | None = Field(default=None, max_length=240)
+    line_start: int = Field(ge=1)
+    line_end: int = Field(ge=1)
+
+
+class FindingVerificationBaseline(BaseModel):
+    """Small finding-time source/topology record, not a repository snapshot."""
+
+    source_snapshot_hash: str = Field(min_length=8, max_length=128)
+    topology_fingerprint: str = Field(min_length=8, max_length=128)
+    files: list[FindingBaselineFile] = Field(default_factory=list, max_length=8)
+    symbols: list[FindingBaselineSymbol] = Field(default_factory=list, max_length=24)
+    topology_edges: list[FixVerificationPathEdge] = Field(default_factory=list, max_length=48)
+
+
 class FindingRemediation(BaseModel):
     status: FindingRemediationStatus = FindingRemediationStatus.UNVERIFIED
     notes: str = "No source recheck has been run."
@@ -358,6 +404,9 @@ class FindingRead(BaseModel):
     resolution: FindingResolution = FindingResolution.OPEN
     resolved_at: datetime | None = None
     remediation: FindingRemediation = Field(default_factory=FindingRemediation)
+    # Stored in the finding payload for Fix Verification, never echoed as part
+    # of the public finding API because it can contain source excerpts.
+    verification_baseline: "FindingVerificationBaseline | None" = Field(default=None, exclude=True)
     created_at: datetime
 
 
@@ -418,6 +467,7 @@ class FixVerificationResult(BaseModel):
     original_failure_condition: str = Field(max_length=2000)
     original_execution_path: list[str] = Field(max_length=20)
     current_execution_path: list[str] = Field(max_length=20)
+    current_path_edges: list[FixVerificationPathEdge] = Field(default_factory=list, max_length=24)
     mitigations_found: list[FixVerificationEvidence] = Field(max_length=12)
     remaining_failure_evidence: list[FixVerificationEvidence] = Field(max_length=12)
     inspected_files: list[str] = Field(max_length=40)
@@ -426,6 +476,12 @@ class FixVerificationResult(BaseModel):
     alternative_mitigation: bool
     confidence: float = Field(ge=0, le=1)
     reasoning_summary: str = Field(max_length=1600)
+    finding_baseline_snapshot_hash: str | None = Field(default=None, max_length=128)
+    pre_refresh_snapshot_hash: str | None = Field(default=None, max_length=128)
+    current_snapshot_hash: str | None = Field(default=None, max_length=128)
+    model_verdict: Literal["FIXED", "STILL_PRESENT", "INCONCLUSIVE"] | None = None
+    validation_status: Literal["UNVALIDATED", "VALIDATED", "DOWNGRADED"] = "UNVALIDATED"
+    validation_reasons: list[str] = Field(default_factory=list, max_length=12)
     # Older stored/provider payloads used `notes`. It remains accepted while
     # every new prompt and persisted report uses the evidence-bearing fields.
     notes: str | None = Field(default=None, max_length=1600)
@@ -438,6 +494,7 @@ class FixVerificationResult(BaseModel):
                 "original_failure_condition": "",
                 "original_execution_path": [],
                 "current_execution_path": [],
+                "current_path_edges": [],
                 "mitigations_found": [],
                 "remaining_failure_evidence": [],
                 "inspected_files": [],
@@ -446,12 +503,19 @@ class FixVerificationResult(BaseModel):
                 "alternative_mitigation": False,
                 "confidence": 0.0,
                 "reasoning_summary": value.get("notes", ""),
+                "finding_baseline_snapshot_hash": None,
+                "pre_refresh_snapshot_hash": None,
+                "current_snapshot_hash": None,
+                "model_verdict": None,
+                "validation_status": "UNVALIDATED",
+                "validation_reasons": [],
                 **value,
             }
         return value
 
 
 FindingRemediation.model_rebuild()
+FindingRead.model_rebuild()
 
 
 class YamlGenerationResult(BaseModel):

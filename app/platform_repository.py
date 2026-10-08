@@ -82,6 +82,7 @@ class PlatformRepository:
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
                     file TEXT NOT NULL, line_start INTEGER NOT NULL, line_end INTEGER NOT NULL,
                     signature TEXT NOT NULL DEFAULT '', component TEXT, source_hash TEXT NOT NULL,
+                    file_hash TEXT NOT NULL DEFAULT '', symbol_hash TEXT NOT NULL DEFAULT '',
                     confidence REAL NOT NULL DEFAULT 1.0,
                     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
                 );
@@ -175,6 +176,8 @@ class PlatformRepository:
             self._ensure_column(conn, "reviews", "output_budget_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(conn, "reviews", "error_message", "TEXT")
             self._ensure_column(conn, "reviews", "last_activity_at", "TEXT")
+            self._ensure_column(conn, "indexed_symbols", "file_hash", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "indexed_symbols", "symbol_hash", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "findings", "resolution_status", "TEXT NOT NULL DEFAULT 'OPEN'")
             self._ensure_column(conn, "findings", "resolved_at", "TEXT")
             self._ensure_column(conn, "findings", "remediation_json", "TEXT")
@@ -317,9 +320,16 @@ class PlatformRepository:
                 conn.executemany("INSERT INTO project_symbols(project_id,name,kind,file,line) VALUES (:project_id,:name,:kind,:file,:line)", legacy)
             if symbols:
                 conn.executemany(
-                    """INSERT INTO indexed_symbols(id,project_id,name,kind,file,line_start,line_end,signature,component,source_hash,confidence)
-                       VALUES (:id,:project_id,:name,:kind,:file,:line_start,:line_end,:signature,:component,:source_hash,:confidence)""",
-                    [{**item, "project_id": project_id, "signature": item.get("signature", ""), "component": item.get("component"), "confidence": item.get("confidence", 1.0)} for item in symbols],
+                    """INSERT INTO indexed_symbols(id,project_id,name,kind,file,line_start,line_end,signature,component,source_hash,file_hash,symbol_hash,confidence)
+                       VALUES (:id,:project_id,:name,:kind,:file,:line_start,:line_end,:signature,:component,:source_hash,:file_hash,:symbol_hash,:confidence)""",
+                    [{
+                        **item, "project_id": project_id, "signature": item.get("signature", ""),
+                        "component": item.get("component"), "confidence": item.get("confidence", 1.0),
+                        # `source_hash` remains the legacy file hash. New callers
+                        # use explicit fields; empty migrated hashes mean unknown.
+                        "file_hash": item.get("file_hash") or item.get("source_hash", ""),
+                        "symbol_hash": item.get("symbol_hash") or "",
+                    } for item in symbols],
                 )
             if relations:
                 conn.executemany(

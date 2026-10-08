@@ -49,6 +49,7 @@ class _Function:
     body_end: int
     signature: str
     source_hash: str
+    symbol_hash: str
     component: str | None
 
 
@@ -224,13 +225,16 @@ class FirmwareIndexer:
                 if body_end is None: continue
                 line_start = _line_at(content, prefix_start)
                 signature = re.sub(r"\s+", " ", content[prefix_start:close + 1]).strip()[:1200]
-                functions.append(_Function(name, path, line_start, _line_at(content, body_end), body_start, body_end, signature, digest, _component_for(path)))
+                symbol_source = re.sub(r"\s+", " ", content[prefix_start:body_end + 1]).strip()
+                normalized_signature = re.sub(r"\s+", " ", signature).strip()
+                symbol_hash = self.digest(f"{normalized_signature}\n{symbol_source}")
+                functions.append(_Function(name, path, line_start, _line_at(content, body_end), body_start, body_end, signature, digest, symbol_hash, _component_for(path)))
 
         function_symbols: list[dict[str, Any]] = []
         by_name: dict[str, list[dict[str, Any]]] = {}
         for function in functions:
             symbol_id = self._stable_id(project_id, "symbol", function.file, function.name, str(function.line_start), function.signature)
-            item = {"id": symbol_id, "name": function.name, "kind": "function", "file": function.file, "line_start": function.line_start, "line_end": function.line_end, "signature": function.signature, "component": function.component, "source_hash": function.source_hash, "confidence": 1.0, "_body_start": function.body_start, "_body_end": function.body_end}
+            item = {"id": symbol_id, "name": function.name, "kind": "function", "file": function.file, "line_start": function.line_start, "line_end": function.line_end, "signature": function.signature, "component": function.component, "source_hash": function.source_hash, "file_hash": function.source_hash, "symbol_hash": function.symbol_hash, "confidence": 1.0, "_body_start": function.body_start, "_body_end": function.body_end}
             function_symbols.append(item); by_name.setdefault(function.name, []).append(item)
         symbols = [{key: value for key, value in item.items() if not key.startswith("_")} for item in function_symbols]
         relations: list[dict[str, Any]] = []
