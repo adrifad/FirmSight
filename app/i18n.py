@@ -60,6 +60,10 @@ _MESSAGES: dict[str, tuple[str, str]] = {
         "Source coverage: {source:.1f}% total · {flow:.1f}% in observed flows · {fallback} fallback units",
         "Cakupan sumber: {source:.1f}% total · {flow:.1f}% dalam flow teramati · {fallback} unit fallback",
     ),
+    "error.review_plan_too_large": (
+        "FirmSight could not create a bounded full-coverage review plan (about {units} units; limit {max_units}). Increase Review Context or narrow the review scope.",
+        "FirmSight tidak dapat membuat rencana review bercakupan penuh dengan batas aman (sekitar {units} unit; batas {max_units}). Tingkatkan Review Context atau persempit cakupan review.",
+    ),
     "review.queued_rereview": (
         "Queued AI recheck for {count} accepted confirmed finding{s} before new discovery",
         "Antrean pemeriksaan ulang AI untuk {count} temuan terkonfirmasi yang diterima sebelum pencarian baru",

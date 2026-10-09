@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
+from types import SimpleNamespace
 from threading import BoundedSemaphore, Event as _ThreadEvent, Lock as _ThreadLock, Thread as _Thread
 from typing import TYPE_CHECKING, Any, Iterator
 from uuid import uuid4
@@ -19,13 +20,13 @@ from fastapi import HTTPException, status
 
 from .ai_provider import AIProvider, ProviderEvent, structured_response
 from .fix_verification import build_differential_context, capture_finding_baseline, validate_fix_verification
-from .flow_review_service import FlowReviewPlanner
+from .flow_review_service import MAX_FALLBACK_UNITS, MAX_TOTAL_REVIEW_UNITS, FlowReviewPlanner, ReviewPlanTooLarge, derive_flow_review_budget
 from .i18n import message as msg
 from .i18n import normalize_locale
 from .platform_repository import PlatformRepository
 from .prompts import FIX_VERIFIER_SYSTEM, FIX_VERIFIER_PROMPT_VERSION, INVESTIGATOR_SYSTEM, INVESTIGATOR_PROMPT_VERSION, VERIFIER_SYSTEM, VERIFIER_PROMPT_VERSION, with_language
 from .platform_schemas import (
-    FindingCandidate, FindingClassification, FindingDecision, FindingDecisionUpdate, FindingRead, FindingRemediationStatus,
+    FindingCandidate, FindingClassification, FindingDecision, FindingDecisionUpdate, FindingRead, FindingRelevantFlow, FindingRemediationStatus,
     FindingResolution, FindingResolutionUpdate, FindingVerification, FixVerificationResult, FlowReviewUnit, InvestigatorResult, ProjectSourceType, ReviewCacheEnvelope, ReviewCreate, ReviewCoverageRead, ReviewOutputBudgetSnapshot, ReviewRead, ReviewUnitSegment, ReviewUnitState, ReviewUnitSummary, VerifierResult,
 )
 from .project_service import ProjectService, now
@@ -90,6 +91,9 @@ class ReviewUnit:
     truncated: bool = False
     unresolved_count: int = 0
     source_ranges: list[tuple[str, int, int]] | None = None
+    async_hops: int = 0
+    cycle_bounded: bool = False
+    omitted_async_consumers: int = 0
 
 
 # Backwards-compatible name used by existing callers/tests.
@@ -316,20 +320,69 @@ class ReviewService:
         if left_location.line_start > right_location.line_end + window or right_location.line_start > left_location.line_end + window:
             return False
 
-        # REQ-3.3: two shared evidence positions are strong independent proof.
         if cls._evidence_overlap(left, right) >= 2:
             return True
-
-        # REQ-3.1: normalized title similarity is authoritative.
-        title_similarity = cls._title_similarity(left.title, right.title)
-        if title_similarity >= cls.TITLE_DUPLICATE_THRESHOLD:
+        if cls._title_similarity(left.title, right.title) >= cls.TITLE_DUPLICATE_THRESHOLD:
             return True
-
         shared_title_tokens = cls._finding_tokens(left.title) & cls._finding_tokens(right.title)
         left_summary = " ".join(sorted(cls._finding_tokens(left.summary)))
         right_summary = " ".join(sorted(cls._finding_tokens(right.summary)))
         summary_similarity = SequenceMatcher(None, left_summary, right_summary).ratio()
         return len(shared_title_tokens) >= 2 and (summary_similarity >= 0.28 or same_function)
+
+    def _root_cause_identity(self, project_id: str, candidate: FindingCandidate, *, symbols: list[dict[str, Any]] | None = None, relations: list[dict[str, Any]] | None = None) -> tuple[str, str, str] | None:
+        """Return a strict sink-anchored identity; weak narrative similarity never merges roots."""
+        symbols = symbols if symbols is not None else self.repository.list_indexed_symbols(project_id)
+        by_id = {str(item.get("id")): item for item in symbols}
+        evidence = {(item.file.replace("\\", "/"), int(item.line)) for item in candidate.evidence}
+        location_file = candidate.location.file.replace("\\", "/")
+        location_lines = set(range(candidate.location.line_start, candidate.location.line_end + 1))
+        anchors: list[tuple[str, str, str, int]] = []
+        for relation in relations if relations is not None else self.repository.list_source_relations(project_id):
+            if relation.get("relation_kind") != "DATA_SINK":
+                continue
+            source = by_id.get(str(relation.get("source_symbol_id") or ""))
+            file = str(relation.get("file") or "").replace("\\", "/")
+            line = int(relation.get("line") or 0)
+            if not source or not line:
+                continue
+            matches_evidence = (file, line) in evidence
+            matches_location = file == location_file and line in location_lines
+            if not (matches_evidence or matches_location):
+                continue
+            anchors.append((str(source.get("name") or ""), file, str(relation.get("target_name") or "").casefold(), line))
+        if not anchors:
+            return None
+        if len(anchors) != len(set(anchors)):
+            # Multiple same-line calls of the same API have no column identity
+            # in current source relations; do not guess which defect is shared.
+            return None
+        # A candidate may describe multiple sink sites. Do not collapse those
+        # sites into one key; choose the strongest single grounded evidence.
+        symbol, file, api, line = sorted(anchors)[0]
+        if not symbol or not api:
+            return None
+        category = candidate.category.strip().casefold()
+        key = "|".join((category, symbol.casefold(), api, file, str(line)))
+        return key, symbol, file
+
+    def _relevant_flows(self, project_id: str, symbol_name: str, file: str) -> list[FindingRelevantFlow]:
+        flow_service = getattr(self, "flow_service", None)
+        if flow_service is None:
+            return []
+        result: list[FindingRelevantFlow] = []
+        for scenario in flow_service.paths_to_symbol(project_id, symbol_name, cap=8, file=file):
+            states = [edge.relation_state for edge in [*scenario.edges, *scenario.async_edges]][:32]
+            path = list(dict.fromkeys(scenario.path or [scenario.entry_name, symbol_name]))[:32]
+            try:
+                result.append(FindingRelevantFlow(
+                    scenario_id=scenario.id, entry_kind=scenario.entry_kind,
+                    entry_name=scenario.entry_name, path=path,
+                    relation_states=states, confidence=scenario.confidence,
+                ))
+            except Exception:
+                continue
+        return result
 
     @staticmethod
     def _is_overload_error(error: RuntimeError) -> bool:
@@ -385,6 +438,8 @@ class ReviewService:
             scenario_id=batch.scenario_id, entry_name=batch.entry_name,
             files=(batch.flow_files or batch.files)[:32], symbol_count=len(batch.flow_symbols or []),
             unresolved_count=batch.unresolved_count, truncated=batch.truncated,
+            async_hops=batch.async_hops, cycle_bounded=batch.cycle_bounded,
+            omitted_async_consumers=batch.omitted_async_consumers,
         )
 
     def _review_coverage(self, batches: list[ReviewContextBatch], raw_files: list[dict[str, str]]) -> ReviewCoverageRead:
@@ -433,6 +488,9 @@ class ReviewService:
             fallback_unit_count=sum(batch.unit_kind == "ORPHAN_SOURCE" for batch in batches),
             truncated_scenarios=sum(batch.truncated and batch.unit_kind != "ORPHAN_SOURCE" for batch in batches),
             unresolved_flow_regions=sum(batch.unresolved_count for batch in batches if batch.unit_kind != "ORPHAN_SOURCE"),
+            average_source_chars_per_unit=(sum(end - start for batch in batches for _path, start, end in (batch.source_ranges or [])) // len(batches)) if batches else 0,
+            max_source_chars_per_unit=max((sum(end - start for _path, start, end in (batch.source_ranges or [])) for batch in batches), default=0),
+            async_composite_count=sum(batch.async_hops > 0 for batch in batches),
         )
 
     @staticmethod
@@ -443,7 +501,7 @@ class ReviewService:
             f"Review unit {number}/{total}: {batch.unit_kind} — {batch.label}. Treat a FLOW unit as one bounded firmware execution scenario with cross-file source; treat ORPHAN_SOURCE as source not connected to a deterministically observed entry-rooted flow. Return at most 1 high-confidence root-cause candidate from this unit; return an empty findings list if none qualify. Keep the title, summary, runtime scenario, impact, and recommendation concise.\n\n{batch.context}"
         )
 
-    def _review_units(self, project_id: str, project_name: str, focus: list[str], raw_files: list[dict[str, str]], *, context_limit_chars: int | None = None, investigator_budget: int | str | None = None) -> list[ReviewContextBatch]:
+    def _review_units(self, project_id: str, project_name: str, focus: list[str], raw_files: list[dict[str, str]], *, context_limit_chars: int | None = None, investigator_budget: int | str | None = None, scope: str = "Full Project") -> list[ReviewContextBatch]:
         """Plan flow scenarios first, then review only source not covered by them.
 
         Keep ``_context_batches`` as the compatibility/fallback implementation
@@ -454,8 +512,21 @@ class ReviewService:
         if flow_service is None:
             return self._context_batches(project_id, project_name, focus, raw_files, context_limit_chars=context_limit_chars, investigator_budget=investigator_budget)
         context_limit = context_limit_chars if context_limit_chars in REVIEW_CONTEXT_CHAR_OPTIONS else self._review_context_chars()
-        source_budget = min(10_000, max(2_000, context_limit - 5_000))
-        planned = FlowReviewPlanner(self.repository, flow_service).plan(project_id, raw_files, source_budget=source_budget)
+        request_stub = self._investigator_request(
+            SimpleNamespace(scope=scope, focus=focus),
+            ReviewContextBatch(context="", files=[], segments=[], unit_id="budget", label="Budget", unit_kind="FLOW"),
+            1, 1,
+        )
+        request_overhead = len(request_stub) + 512
+        budget = derive_flow_review_budget(context_limit, investigator_budget, request_overhead)
+        source_budget = min(
+            budget.source_chars,
+            max(2_000, context_limit - request_overhead - 1_400 - budget.max_symbols * 160),
+        )
+        planned = FlowReviewPlanner(self.repository, flow_service).plan(
+            project_id, raw_files, source_budget=source_budget, budget=budget,
+        )
+        body_limit = context_limit - request_overhead
         symbols_by_id = {str(item["id"]): item for item in self.repository.list_indexed_symbols(project_id)}
         result: list[ReviewContextBatch] = []
         for unit in planned:
@@ -483,25 +554,54 @@ class ReviewService:
             if getattr(self, "context_builder", None):
                 built = self.context_builder.build(project_id, " ".join(focus), selected_files=unit.files, symbols=symbol_names, max_chars=min(3_000, max(800, context_limit // 8)))
                 shared_context = f'\nRelevant project context (untrusted retrieved data):\n<retrieved_context untrusted_data="true">\n{built["text"][:3_000]}\n</retrieved_context>'
-            flow_body = (
-                f"FLOW REVIEW UNIT\nKind: {unit.unit_kind}\nScenario: {unit.title}\nEntry: {unit.entry_kind or 'none'} {unit.entry_name or ''}\n"
-                f"Observed execution edges:\n{path_edges}\n"
-                f"Async transitions (not CALLS):\n" + ("\n".join(async_lines) or "none") + "\n"
-                f"Data/value facts:\n" + ("\n".join(data_lines) or "none") + "\n"
-                f"Validation ordering candidates:\n" + ("\n".join(validation_order) or "none indexed") + "\n"
-                f"Value flow v1 (identifier-only; gaps are not inferred):\n{value_flow}\n"
-                f"Resource facts (resource identity preserved):\n" + ("\n".join(resource_lines) or "none") + "\n"
-                f"Unresolved edges:\n" + ("\n".join(unresolved_lines) or "none") + "\n"
-                f"Source coverage: {len(unit.source_segments)} exact source segments; flow fingerprint={unit.flow_fingerprint}; snapshot={unit.source_snapshot_hash}; topology={unit.topology_fingerprint}.\n"
-                "Evidence rule: source excerpts and OBSERVED indexed relations are authoritative. INFERRED/UNKNOWN edges are not proof of reachability. ORPHAN_SOURCE is not known to be entry-reachable.\n"
-                f"Project Intelligence (supporting, subordinate to current source):\n{intelligence or 'none'}\n"
-                f"{shared_context}\nCURRENT SOURCE\n" + "\n\n".join(source_parts)
-            )
-            if len(flow_body) > context_limit:
-                # Source is selected and bounded first. Trim metadata sections
-                # only when retrieved intelligence/context exceeded its cap.
-                flow_body = flow_body[:max(0, context_limit - sum(map(len, source_parts)))] + "\nCURRENT SOURCE\n" + "\n\n".join(source_parts)
-                flow_body = flow_body[:context_limit]
+            source_block = "CURRENT SOURCE\n" + "\n\n".join(source_parts)
+            if len(source_block) > body_limit:
+                raise ReviewPlanTooLarge(
+                    total_source_chars=sum(len(str(item["content"])) for item in raw_files if FlowReviewPlanner._reviewable(item)),
+                    flow_units=1, fallback_units_estimate=0, max_units=MAX_TOTAL_REVIEW_UNITS,
+                    max_fallback_units=MAX_FALLBACK_UNITS,
+                )
+            metadata_sections = [
+                f"FLOW REVIEW UNIT\nKind: {unit.unit_kind} · {unit.title}\nEntry: {unit.entry_kind or 'none'} {unit.entry_name or ''}\nExecution edges:\n{path_edges}",
+                "Unresolved edges:\n" + ("\n".join(unresolved_lines) or "none"),
+                "Validation / data facts:\n" + ("\n".join(validation_order + data_lines) or "none") + f"\nValue flow v1 (identifier-only):\n{value_flow}",
+                "Async transitions (not CALLS):\n" + ("\n".join(async_lines) or "none") + "\nResource facts:\n" + ("\n".join(resource_lines) or "none"),
+                f"Evidence rule: current source and OBSERVED relations are authoritative; INFERRED/UNKNOWN edges do not prove reachability. ORPHAN_SOURCE is not known to be entry-reachable.\n{shared_context}",
+                f"Project Intelligence (supporting, subordinate to current source):\n{intelligence or 'none'}",
+                f"Snapshot {unit.source_snapshot_hash}; topology {unit.topology_fingerprint}; flow {unit.flow_fingerprint}.",
+            ]
+            if unit.cycle_bounded:
+                metadata_sections.insert(1, f"Async cycle bounded at repeated resource: {unit.cycle_resource or 'unknown resource'}.")
+            if unit.omitted_async_consumers:
+                metadata_sections.insert(1, f"Async fan-out truncated: {unit.omitted_async_consumers} additional consumer(s) were not expanded.")
+            remaining_metadata = body_limit - len(source_block)
+            metadata_parts: list[str] = []
+            for section in metadata_sections:
+                if remaining_metadata <= 0:
+                    break
+                if len(section) <= remaining_metadata:
+                    metadata_parts.append(section)
+                    remaining_metadata -= len(section) + 2
+                    continue
+                # Keep only complete lines and no XML-like wrappers when a
+                # supporting section must be shortened. Source stays intact.
+                kept: list[str] = []
+                used = 0
+                for line in section.splitlines():
+                    if used + len(line) + 1 > remaining_metadata:
+                        break
+                    kept.append(line)
+                    used += len(line) + 1
+                if kept:
+                    metadata_parts.append("\n".join(kept))
+                break
+            flow_body = "\n\n".join(metadata_parts + [source_block])
+            if len(flow_body) > body_limit:
+                # Metadata separators are the only additional bytes; trim its
+                # final complete section rather than clipping any source block.
+                while metadata_parts and len(flow_body) > body_limit:
+                    metadata_parts.pop()
+                    flow_body = "\n\n".join(metadata_parts + [source_block])
             segments = [ReviewUnitSegment(file=item.file, line_start=item.line_start, line_end=item.line_end, content_hash=item.content_hash) for item in unit.source_segments]
             result.append(ReviewContextBatch(
                 context=flow_body, files=unit.files, segments=segments, unit_id=unit.id,
@@ -510,6 +610,8 @@ class ReviewService:
                 flow_fingerprint=unit.flow_fingerprint, truncated=unit.truncated,
                 unresolved_count=len(unit.unresolved_edges),
                 source_ranges=[(part.file, part.start_offset, part.end_offset) for part in unit.source_segments],
+                async_hops=unit.async_hops, cycle_bounded=unit.cycle_bounded,
+                omitted_async_consumers=unit.omitted_async_consumers,
             ))
         return result
 
@@ -525,13 +627,16 @@ class ReviewService:
         lines: list[str] = []
         for source in sources[:8]:
             identifier, symbol_id = source.metadata.get("output_identifier", ""), source.source_id
+            companion_identifiers = {source.metadata.get("return_identifier", "")} - {""}
             symbol_names = {segment.symbol_id: segment.symbol for segment in unit.source_segments if segment.symbol_id and segment.symbol}
             chain = [f'{source.metadata.get("source_kind", "external input")}:{identifier} @ {source.file}:{source.line}']
             return_identifier = source.metadata.get("return_identifier")
             direct_sink = next((edge for edge in sinks if edge.source_id == symbol_id and identifier in edge.metadata.get("arguments", "").split(",")), None)
             if direct_sink:
                 chain.append(f'{direct_sink.metadata.get("api", "sink")}({direct_sink.metadata.get("arguments", "?")}) @ {direct_sink.file}:{direct_sink.line}')
-                validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, direct_sink) and (identifier in edge.metadata.get("identifiers", "").split(",") or bool(return_identifier and return_identifier in edge.metadata.get("identifiers", "").split(",")))]
+                sink_arguments = set(direct_sink.metadata.get("arguments", "").split(","))
+                tracked = ({identifier} | companion_identifiers) & sink_arguments
+                validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, direct_sink) and tracked.intersection(edge.metadata.get("identifiers", "").split(","))]
                 chain.append("VALIDATED_BEFORE_SINK: " + ", ".join(f'{edge.file}:{edge.line}' for edge in validations) if validations else "NO_TRACKED_VALIDATION_BEFORE_SINK")
                 lines.append(" → ".join(chain))
                 continue
@@ -546,12 +651,27 @@ class ReviewService:
                     break
                 identifier = step.metadata.get("target_parameter", "")
                 symbol_id = step.target_id
+                # Carry only directly paired identifiers through the same
+                # statically observed call site, such as payload + received
+                # length. No arithmetic or alias relationship is inferred.
+                for companion_step in propagation:
+                    same_call = (
+                        companion_step.source_id == step.source_id
+                        and companion_step.target_id == step.target_id
+                        and companion_step.file == step.file
+                        and companion_step.line == step.line
+                        and companion_step.metadata.get("source_identifier") in companion_identifiers
+                    )
+                    if same_call:
+                        companion_identifiers.add(companion_step.metadata.get("target_parameter", ""))
+                companion_identifiers.discard("")
                 chain.append(f'{symbol_names.get(symbol_id, symbol_id)}:{identifier} @ {step.file}:{step.line}')
                 sink = next((edge for edge in sinks if edge.source_id == symbol_id and identifier in edge.metadata.get("arguments", "").split(",")), None)
                 if sink:
                     chain.append(f'{sink.metadata.get("api", "sink")}({sink.metadata.get("arguments", "?")}) @ {sink.file}:{sink.line}')
-                    return_companion = return_identifier if symbol_id == source.source_id else None
-                    validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, sink) and (identifier in edge.metadata.get("identifiers", "").split(",") or bool(return_companion and return_companion in edge.metadata.get("identifiers", "").split(",")))]
+                    sink_arguments = set(sink.metadata.get("arguments", "").split(","))
+                    tracked = ({identifier} | companion_identifiers) & sink_arguments
+                    validations = [edge for edge in observed if edge.kind == "VALIDATES" and edge.source_id == symbol_id and ReviewService._fact_precedes(unit, edge, sink) and tracked.intersection(edge.metadata.get("identifiers", "").split(","))]
                     chain.append("VALIDATED_BEFORE_SINK: " + ", ".join(f'{edge.file}:{edge.line}' for edge in validations) if validations else "NO_TRACKED_VALIDATION_BEFORE_SINK")
                     lines.append(" → ".join(chain))
                     break
@@ -584,11 +704,14 @@ class ReviewService:
         sink_match = re.search(rf"\b{re.escape(api)}\s*\(", body) if api else None
         return predicate_at >= 0 and sink_match is not None and predicate_at < sink_match.start()
 
-    def _cross_flow_support(self, project_id: str, candidate: FindingCandidate, batch: ReviewContextBatch) -> str:
+    def _cross_flow_support(self, project_id: str, candidate: FindingCandidate, batch: ReviewContextBatch, root_identity: tuple[str, str, str] | None = None) -> str:
         flow_service = getattr(self, "flow_service", None)
         if flow_service is None or not batch.unit_kind.startswith("FLOW"):
             return ""
-        scenarios = flow_service.paths_to_symbol(project_id, candidate.location.function or "", cap=4, file=candidate.location.file)
+        root = root_identity if root_identity is not None else self._root_cause_identity(project_id, candidate)
+        target_name = root[1] if root else (candidate.location.function or "")
+        target_file = root[2] if root else candidate.location.file
+        scenarios = flow_service.paths_to_symbol(project_id, target_name, cap=8, file=target_file)
         if len(scenarios) <= 1:
             return ""
         raw = {item["path"]: item["content"] for item in self.repository.raw_files(project_id)}
@@ -690,7 +813,19 @@ class ReviewService:
         review_id = f"REV-{uuid4().hex[:10].upper()}"
         context_chars = self._review_context_chars()
         source_snapshot_hash = ProjectService.snapshot_hash(raw_files)
-        batches = self._review_units(project_id, project.name, request.focus, raw_files, context_limit_chars=context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
+        try:
+            batches = self._review_units(
+                project_id, project.name, request.focus, raw_files,
+                context_limit_chars=context_chars,
+                investigator_budget=getattr(investigator, "max_tokens", None),
+                scope=request.scope,
+            )
+        except ReviewPlanTooLarge as error:
+            raise self._error(
+                status.HTTP_413_CONTENT_TOO_LARGE, "error.review_plan_too_large",
+                units=error.flow_units + error.fallback_units_estimate,
+                max_units=error.max_units,
+            ) from error
         if not batches:
             raise self._error(status.HTTP_409_CONFLICT, "error.no_reviewable_files")
         context_files = list(dict.fromkeys(path for batch in batches for path in batch.files))
@@ -949,6 +1084,8 @@ class ReviewService:
         raw_files = self.repository.raw_files(review.project_id)
         changed_files = self._snapshot_changed_files(baseline_files, raw_files)
         current_snapshot_hash = ProjectService.snapshot_hash(raw_files)
+        current_finding_symbols = self.repository.list_indexed_symbols(review.project_id)
+        current_finding_relations = self.repository.list_source_relations(review.project_id)
         # ``review.diagnostics`` are typed ReviewDiagnosticRead models (not dicts),
         # so use the attribute. Reading it with ``.get`` crashed the retry path
         # whenever a review had diagnostics but zero validated/unavailable
@@ -995,7 +1132,12 @@ class ReviewService:
             progress,
         )
         self._revalidate_intelligence(review.project_id, progress)
-        batches = self._review_units(review.project_id, project.name, review.focus, raw_files, context_limit_chars=review.context_chars, investigator_budget=getattr(investigator, "max_tokens", None))
+        batches = self._review_units(
+            review.project_id, project.name, review.focus, raw_files,
+            context_limit_chars=review.context_chars,
+            investigator_budget=getattr(investigator, "max_tokens", None),
+            scope=review.scope,
+        )
         if not batches:
             raise RuntimeError("No reviewable firmware source files were available for AI context")
         if retry_target_batches is None:
@@ -1122,6 +1264,31 @@ class ReviewService:
         batch_states: dict[int, list[dict]] = {}
         cacheable_batches: dict[int, bool] = {}
         pending_verifiers: list[tuple[int, int, ReviewContextBatch, FindingCandidate]] = []
+        candidate_root_identities: dict[tuple[int, int], tuple[str, str, str] | None] = {}
+        root_candidates: dict[str, FindingCandidate | FindingRead] = {}
+        root_flow_evidence: dict[str, list[FindingRelevantFlow]] = {}
+        for item in project_findings:
+            if item.review_id == review_id and item.root_cause_key:
+                root_candidates[item.root_cause_key] = item
+                root_flow_evidence[item.root_cause_key] = list(item.relevant_flows[:8])
+
+        def remember_root_flow(root: tuple[str, str, str] | None) -> None:
+            if root is None:
+                return
+            key, symbol_name, file = root
+            known = root_flow_evidence.setdefault(key, [])
+            before = len(known)
+            existing_ids = {item.scenario_id for item in known}
+            for flow in self._relevant_flows(review.project_id, symbol_name, file):
+                if flow.scenario_id not in existing_ids and len(known) < 8:
+                    known.append(flow)
+                    existing_ids.add(flow.scenario_id)
+            existing = root_candidates.get(key)
+            if len(known) > before and isinstance(existing, FindingRead):
+                self.repository.update_finding_relevant_flows(
+                    existing.id, review.project_id, key,
+                    [item.model_dump(mode="json") for item in known],
+                )
 
         def prepare_verifier_batch(batch_number: int) -> None:
             batch, candidates, error = investigator_results[batch_number]
@@ -1137,18 +1304,32 @@ class ReviewService:
                 # review may still legitimately re-surface an issue after a fix.
                 key = (candidate.location.file, candidate.location.line_start, candidate.location.line_end, self._normalize_title(candidate.title).casefold())
                 cached_verification = cached_verifications.get((batch_number, candidate_number))
+                if not self._candidate_has_real_evidence(candidate, raw_files, batch.segments):
+                    cacheable_batches[batch_number] = False
+                    progress.append(self._t("review.discarded_unverifiable", number=batch_number, candidate=candidate_number))
+                    continue
+                root = self._root_cause_identity(
+                    review.project_id, candidate, symbols=current_finding_symbols,
+                    relations=current_finding_relations,
+                )
+                candidate_root_identities[(batch_number, candidate_number)] = root
+                root_key = root[0] if root else None
+                if root_key and root_key in root_candidates:
+                    cacheable_batches[batch_number] = False
+                    remember_root_flow(root)
+                    progress.append(self._t("review.skipped_duplicate", number=batch_number, title=candidate.title, match=f" (same source root as: {root_candidates[root_key].title})"))
+                    continue
                 duplicate = next((item for item in seen_candidates if self._same_finding_candidate(candidate, item)), None)
                 if duplicate is not None or (key in existing_candidate_signatures and cached_verification is None):
                     cacheable_batches[batch_number] = False
                     duplicate_title = f" (matches: {duplicate.title})" if duplicate is not None else ""
                     progress.append(self._t("review.skipped_duplicate", number=batch_number, title=candidate.title, match=duplicate_title))
                     continue
-                if not self._candidate_has_real_evidence(candidate, raw_files, batch.segments):
-                    cacheable_batches[batch_number] = False
-                    progress.append(self._t("review.discarded_unverifiable", number=batch_number, candidate=candidate_number))
-                    continue
                 seen_candidates.append(candidate)
-                state = {"candidate_number": candidate_number, "candidate": candidate, "verification": cached_verification, "error": None}
+                if root_key:
+                    root_candidates[root_key] = candidate
+                    remember_root_flow(root)
+                state = {"candidate_number": candidate_number, "candidate": candidate, "verification": cached_verification, "error": None, "root_key": root_key}
                 states.append(state)
                 if cached_verification is None:
                     pending_verifiers.append((batch_number, candidate_number, batch, candidate))
@@ -1164,7 +1345,7 @@ class ReviewService:
                 with request_slots:
                     result = structured_response(
                         verifier, VerifierResult, with_language(VERIFIER_SYSTEM, self._locale()),
-                        f"Required JSON Schema:\n{json.dumps(VerifierResult.model_json_schema(), ensure_ascii=False)}\n\nCandidate JSON:\n{json.dumps(candidate.model_dump(mode='json'), ensure_ascii=False)}\n\nRelevant bounded flow/source context (review unit {batch_number}/{len(batches)}):\n{batch.context}{self._cross_flow_support(review.project_id, candidate, batch)}",
+                        f"Required JSON Schema:\n{json.dumps(VerifierResult.model_json_schema(), ensure_ascii=False)}\n\nCandidate JSON:\n{json.dumps(candidate.model_dump(mode='json'), ensure_ascii=False)}\n\nRelevant bounded flow/source context (review unit {batch_number}/{len(batches)}):\n{batch.context}{self._cross_flow_support(review.project_id, candidate, batch, candidate_root_identities.get((batch_number, candidate_number)))}",
                         operation=f"review:{review_id}:verifier:batch-{batch_number}:candidate-{candidate_number}",
                         on_event=self._diagnostic_sink(review_id, role="verifier", batch_number=batch_number, total_batches=len(batches), file_count=len(batch.files), execution_attempt=review.execution_attempt, event_collector=events),
                     )
@@ -1238,8 +1419,8 @@ class ReviewService:
         execution["current_units"] = []
         execution["phase"] = "FINALIZING"
         self.repository.update_review(review_id, status="RUNNING", progress=progress, execution_progress=execution)
-        finding_source_symbols = self.repository.list_indexed_symbols(review.project_id)
-        finding_source_relations = self.repository.list_source_relations(review.project_id)
+        finding_source_symbols = current_finding_symbols
+        finding_source_relations = current_finding_relations
         finding_topology_snapshot = self.repository.topology_snapshot(review.project_id) or {}
         for batch_number in sorted(batch_states):
             batch, candidates, _ = investigator_results[batch_number]
@@ -1274,6 +1455,8 @@ class ReviewService:
                     "assumptions": verification.remaining_assumptions or [item.model_dump(mode="json") for item in candidate.assumptions],
                     "topology_path": self._finding_topology(review.project_id, candidate),
                     "lifetime_evidence": self._finding_lifetime(review.project_id, candidate),
+                    "root_cause_key": state.get("root_key"),
+                    "relevant_flows": [item.model_dump(mode="json") for item in root_flow_evidence.get(state.get("root_key"), [])[:8]],
                     "decision": FindingDecision.UNREVIEWED, "decision_reason": None, "resolution": FindingResolution.OPEN, "resolved_at": None, "created_at": datetime.now(UTC),
                 })
                 finding = finding.model_copy(update={

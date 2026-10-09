@@ -1,8 +1,9 @@
 """Regression tests for flow-first Investigator review planning and context."""
 
 import json
+import pytest
 
-from app.flow_review_service import FlowReviewPlanner
+from app.flow_review_service import FlowReviewPlanner, ReviewPlanTooLarge, derive_flow_review_budget
 from app.flow_service import FlowService
 from app.indexer import FirmwareIndexer
 from app.platform_repository import PlatformRepository
@@ -283,3 +284,213 @@ def test_flow_first_review_sends_cross_file_unit_to_investigator_and_persists_pl
     assert any(unit["unit_kind"].startswith("FLOW") for unit in persisted["review_units"])
     assert persisted["source_coverage"]["source_coverage_percent"] == 100
     assert persisted["source_coverage"]["flow_coverage_percent"] > 0
+
+
+def test_adaptive_budget_reduces_flow_window_fragmentation_and_keeps_request_bounded(tmp_path):
+    statements = " ".join("volatile unsigned value_{0} = {0};".format(index) for index in range(95))
+    source = []
+    for index in range(10):
+        call = f" f{index + 1}();" if index < 9 else ""
+        source.append(f"void f{index}(void) {{ {statements}{call} }}")
+    source.append("void app_main(void) { f0(); }")
+    database, repository, projects, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/chain.c": "\n".join(source),
+    })
+    service = ReviewService(repository, projects, lambda _role: None, MemoryService(MemoryRepository(database)), flow_service=flow)
+    raw = repository.raw_files(project.id)
+    small = service._review_units(project.id, "Flow review", [], raw, context_limit_chars=18_000, investigator_budget=2_000)
+    large = service._review_units(project.id, "Flow review", [], raw, context_limit_chars=42_000, investigator_budget=2_000)
+    small_flow = [unit for unit in small if unit.unit_kind.startswith("FLOW") and unit.entry_name == "app_main"]
+    large_flow = [unit for unit in large if unit.unit_kind.startswith("FLOW") and unit.entry_name == "app_main"]
+    assert len(large_flow) < len(small_flow)
+    assert {name for unit in small_flow for name in (unit.flow_symbols or [])} >= {f"f{i}" for i in range(10)}
+    assert {name for unit in large_flow for name in (unit.flow_symbols or [])} >= {f"f{i}" for i in range(10)}
+    assert [unit.unit_id for unit in large] == [unit.unit_id for unit in service._review_units(project.id, "Flow review", [], raw, context_limit_chars=42_000, investigator_budget=2_000)]
+    for limit, units in ((18_000, small), (42_000, large)):
+        for number, unit in enumerate(units, start=1):
+            request = service._investigator_request(ReviewCreate(scope="Full Project", focus=[]), unit, number, len(units))
+            assert len(request) <= limit
+    assert derive_flow_review_budget(18_000, 2_000).bucket != derive_flow_review_budget(42_000, 2_000).bucket
+
+
+def test_async_flow_continues_across_multiple_exact_queue_boundaries(tmp_path):
+    _, _, _, project, _, units = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/pipeline.c": """
+typedef void *QueueHandle_t;
+QueueHandle_t raw_queue, filtered_queue, output_queue;
+void sensor_task(void *p) { int sample = 1; xQueueSend(raw_queue, &sample, 0); }
+void process_task(void *p) { int sample; xQueueReceive(raw_queue, &sample, 0); filter_sample(&sample); xQueueSend(filtered_queue, &sample, 0); }
+void mqtt_task(void *p) { int sample; xQueueReceive(filtered_queue, &sample, 0); xQueueSend(output_queue, &sample, 0); }
+void publish_task(void *p) { int sample; xQueueReceive(output_queue, &sample, 0); publish_sample(sample); }
+void filter_sample(int *sample) { *sample += 1; }
+void publish_sample(int sample) { mqtt_publish(sample); }
+void app_main(void) { xTaskCreate(sensor_task, "sensor", 1, 0, 1, 0); xTaskCreate(process_task, "process", 1, 0, 1, 0); xTaskCreate(mqtt_task, "mqtt", 1, 0, 1, 0); xTaskCreate(publish_task, "publish", 1, 0, 1, 0); }
+""",
+    })
+    composites = [unit for unit in units if unit.async_hops >= 3]
+    assert composites
+    assert any({edge.metadata.get("resource") for edge in unit.async_edges} >= {"raw_queue", "filtered_queue", "output_queue"} for unit in composites)
+    assert any("publish_sample" in {segment.symbol for segment in unit.source_segments} for unit in composites)
+    assert all(edge.kind in {"PUBLISHES_TO_QUEUE", "RECEIVES_FROM_QUEUE"} for unit in composites for edge in unit.async_edges)
+
+
+def test_async_fanout_is_capped_and_reports_omitted_consumers(tmp_path):
+    _, repository, _, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/fanout.c": "typedef void *QueueHandle_t; QueueHandle_t events; void producer(void *p) { int value = 0; xQueueSend(events, &value, 0); } void consumer_a(void *p) { int value; xQueueReceive(events, &value, 0); } void consumer_b(void *p) { int value; xQueueReceive(events, &value, 0); } void consumer_c(void *p) { int value; xQueueReceive(events, &value, 0); } void app_main(void) { xTaskCreate(producer, \"p\", 1, 0, 1, 0); xTaskCreate(consumer_a, \"a\", 1, 0, 1, 0); xTaskCreate(consumer_b, \"b\", 1, 0, 1, 0); xTaskCreate(consumer_c, \"c\", 1, 0, 1, 0); }\n",
+    })
+    planner = FlowReviewPlanner(repository, flow, max_async_consumers_per_hop=1)
+    units = planner.plan(project.id, repository.raw_files(project.id))
+    assert any(unit.omitted_async_consumers > 0 and unit.truncated for unit in units)
+
+
+def test_fallback_compaction_refuses_to_drop_source_when_hard_unit_budget_is_exceeded(tmp_path):
+    _, repository, _, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/orphan.c": "",
+    })
+    planner = FlowReviewPlanner(repository, flow)
+    with pytest.raises(ReviewPlanTooLarge) as caught:
+        planner._orphan_units(
+            project.id, {"src/orphan.c": "x" * 18_000}, {}, "source-snapshot", "topology-fingerprint",
+            2_000, 1, 1, 1, "ctx-test", 0,
+        )
+    assert caught.value.fallback_units_estimate > 1
+
+
+def test_review_begin_returns_explicit_plan_too_large_error(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    database = str(tmp_path / "plan-limit.db")
+    repository = PlatformRepository(database)
+    projects = ProjectService(repository, FirmwareIndexer())
+    project = projects.create(ProjectCreate(name="Plan limit", description=""))
+    projects.add_files(project.id, {"src/main.c": "void app_main(void) {}\n"})
+    projects.index(project.id)
+    service = ReviewService(repository, projects, lambda _role: CapturingProvider(), MemoryService(MemoryRepository(database)), flow_service=FlowService(repository))
+    service._review_units = lambda *_args, **_kwargs: (_ for _ in ()).throw(ReviewPlanTooLarge(40_000, 384, 257, 640, 256))
+    with pytest.raises(HTTPException) as caught:
+        service.begin(project.id, ReviewCreate(scope="Full Project", focus=["memory"]))
+    assert caught.value.status_code == 413
+    assert "bounded full-coverage review plan" in str(caught.value.detail)
+
+
+def test_root_cause_identity_uses_grounded_sink_and_keeps_distinct_defects_separate(tmp_path):
+    database, repository, projects, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/parser.c": "void parse(char *data) {\n memcpy(a, data, 48);\n memcpy(b, data, 96);\n}\nvoid app_main(void) { parse(input); }\n",
+    })
+    service = ReviewService(repository, projects, lambda _role: None, MemoryService(MemoryRepository(database)), flow_service=flow)
+    symbols = repository.list_indexed_symbols(project.id)
+    relations = repository.list_source_relations(project.id)
+    from app.platform_schemas import FindingCandidate
+    def candidate(title, line, category="MEMORY_SAFETY", location_line=None):
+        return FindingCandidate.model_validate({
+            "title": title, "classification": "CONFIRMED_BUG", "severity": "high", "category": category, "confidence": .9,
+            "location": {"file": "src/parser.c", "function": "parse", "line_start": location_line or line, "line_end": location_line or line},
+            "summary": "The copy can exceed the destination size.", "evidence": [{"description": "copy operation", "file": "src/parser.c", "line": line}],
+            "execution_path": ["parse", "memcpy"], "runtime_scenario": "Input reaches the copy.", "impact": "Memory corruption.", "assumptions": [], "recommendation": "bound the operation",
+        })
+    first = service._root_cause_identity(project.id, candidate("Buffer issue at first copy", 2), symbols=symbols, relations=relations)
+    same_sink_different_primary = service._root_cause_identity(project.id, candidate("Different wording", 2, location_line=5), symbols=symbols, relations=relations)
+    second_sink = service._root_cause_identity(project.id, candidate("Buffer issue at second copy", 3), symbols=symbols, relations=relations)
+    other_category = service._root_cause_identity(project.id, candidate("Different invariant", 2, category="RESOURCE_LIFETIME"), symbols=symbols, relations=relations)
+    assert first and same_sink_different_primary and first[0] == same_sink_different_primary[0]
+    assert second_sink and first[0] != second_sink[0]
+    assert other_category and first[0] != other_category[0]
+
+
+def test_same_sink_from_http_and_mqtt_is_persisted_once_with_both_flows(tmp_path, monkeypatch):
+    from app.platform_schemas import FindingCandidate, InvestigatorResult, VerifierResult
+    database = str(tmp_path / "multi-flow-dedup.db")
+    repository = PlatformRepository(database)
+    projects = ProjectService(repository, FirmwareIndexer())
+    project = projects.create(ProjectCreate(name="Root cause dedup", description=""))
+    projects.add_files(project.id, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/handlers.c": "void parse(char *data); void http_handler(void) { parse(payload); } void mqtt_handler(void) { parse(payload); } void app_main(void) { http_handler(); mqtt_handler(); }\n",
+        "src/parser.c": "void parse(char *data) { memcpy(dst, data, 48); }\n",
+    })
+    projects.index(project.id)
+    flow = FlowService(repository)
+    provider = CapturingProvider()
+    verifier_requests: list[str] = []
+    candidate_a = FindingCandidate.model_validate({
+        "title": "HTTP parser copy exceeds destination", "classification": "CONFIRMED_BUG", "severity": "high", "category": "MEMORY_SAFETY", "confidence": .91,
+        "location": {"file": "src/handlers.c", "function": "http_handler", "line_start": 1, "line_end": 1}, "summary": "The shared parser performs a fixed oversized copy.",
+        "evidence": [{"description": "memcpy copies beyond destination capacity", "file": "src/parser.c", "line": 1}], "execution_path": ["http_handler", "parse", "memcpy"],
+        "runtime_scenario": "HTTP input reaches the parser copy.", "impact": "Memory corruption.", "assumptions": [], "recommendation": "bound the copy",
+    })
+    candidate_b_payload = candidate_a.model_dump(mode="json")
+    candidate_b_payload.update({
+        "title": "MQTT command parser can overwrite storage",
+        "location": {"file": "src/parser.c", "function": "parse", "line_start": 1, "line_end": 1},
+        "execution_path": ["mqtt_handler", "parse", "memcpy"],
+    })
+    candidate_b = FindingCandidate.model_validate(candidate_b_payload)
+
+    def structured(_provider, schema, _system, user_prompt, **_kwargs):
+        if schema.__name__ == "InvestigatorResult":
+            provider.prompts.append(("Investigator", user_prompt))
+            candidate = candidate_a if "http_handler" in user_prompt else candidate_b if "mqtt_handler" in user_prompt else None
+            return InvestigatorResult(findings=[candidate] if candidate else [])
+        verifier_requests.append(user_prompt)
+        return VerifierResult(verdict="SURVIVES", notes="Current sink evidence and both observed caller paths support the issue.")
+
+    monkeypatch.setattr("app.review_service.structured_response", structured)
+    reviews = ReviewService(repository, projects, lambda _role: provider, MemoryService(MemoryRepository(database)), flow_service=flow)
+    reviews._run_learning = lambda *args, **kwargs: None
+    reviews._sync_knowledge_vault = lambda *args, **kwargs: None
+    review = reviews.begin(project.id, ReviewCreate(scope="Full Project", focus=["memory"])); reviews.execute(review.id)
+    findings = reviews.findings(project.id)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.root_cause_key
+    assert len(finding.relevant_flows) >= 2
+    assert any("http_handler" in item.path for item in finding.relevant_flows)
+    assert any("mqtt_handler" in item.path for item in finding.relevant_flows)
+    assert len(verifier_requests) == 1
+    assert "http_handler" in verifier_requests[0] and "mqtt_handler" in verifier_requests[0]
+
+
+def test_value_flow_tracks_direct_payload_length_companion_and_rejects_unrelated_predicate(tmp_path):
+    database, repository, projects, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/data.c": """
+void parse(char *data, int size);
+void handler(void) { char payload[64]; int len = recv(fd, payload, sizeof(payload), 0); if (len > 0) parse(payload, len); }
+void parse(char *data, int size) { if (size <= sizeof(dst)) memcpy(dst, data, size); }
+void app_main(void) { handler(); }
+""",
+    })
+    service = ReviewService(repository, projects, lambda _role: None, MemoryService(MemoryRepository(database)), flow_service=flow)
+    units = service._review_units(project.id, "Value flow", [], repository.raw_files(project.id))
+    unit = next(item for item in units if item.unit_kind.startswith("FLOW") and "parse" in (item.flow_symbols or []))
+    assert "VALIDATED_BEFORE_SINK" in unit.context
+    assert "SOCKET:payload" in unit.context
+
+    # A predicate on another local does not protect the length passed to memcpy.
+    projects.add_files(project.id, {
+        "src/data.c": """
+void parse(char *data, int size);
+void handler(void) { char payload[64]; int len = recv(fd, payload, 64, 0); parse(payload, len); }
+void parse(char *data, int size) { int retry_count = 0; if (retry_count < 3) memcpy(dst, data, size); }
+void app_main(void) { handler(); }
+""",
+    })
+    projects.index(project.id)
+    current_flow = FlowService(repository)
+    current = ReviewService(repository, projects, lambda _role: None, MemoryService(MemoryRepository(database)), flow_service=current_flow)
+    unit = next(item for item in current._review_units(project.id, "Value flow", [], repository.raw_files(project.id)) if item.unit_kind.startswith("FLOW") and "parse" in (item.flow_symbols or []))
+    assert "NO_TRACKED_VALIDATION_BEFORE_SINK" in unit.context
+
+
+def test_value_flow_does_not_propagate_complex_length_expression(tmp_path):
+    database, repository, projects, project, flow, _ = _setup(tmp_path, {
+        "sdkconfig": "CONFIG_IDF_TARGET_ESP32=y\n",
+        "src/data.c": "void parse(char *data, int size); void handler(void) { char payload[64]; int len = recv(fd, payload, 64, 0); parse(payload, len * 2); } void parse(char *data, int size) { if (size <= sizeof(dst)) memcpy(dst, data, size); } void app_main(void) { handler(); }\n",
+    })
+    service = ReviewService(repository, projects, lambda _role: None, MemoryService(MemoryRepository(database)), flow_service=flow)
+    unit = next(item for item in service._review_units(project.id, "Value flow", [], repository.raw_files(project.id)) if item.unit_kind.startswith("FLOW") and "parse" in (item.flow_symbols or []))
+    assert "NO_TRACKED_VALIDATION_BEFORE_SINK" in unit.context

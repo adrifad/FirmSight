@@ -381,6 +381,10 @@ class FlowReviewUnit(BaseModel):
     truncated: bool = False
     confidence: float = Field(default=1.0, ge=0, le=1)
     covered_source_segments: int = Field(default=0, ge=0)
+    async_hops: int = Field(default=0, ge=0, le=4)
+    cycle_bounded: bool = False
+    cycle_resource: str | None = Field(default=None, max_length=240)
+    omitted_async_consumers: int = Field(default=0, ge=0)
 
 
 class ReviewUnitSummary(BaseModel):
@@ -395,6 +399,9 @@ class ReviewUnitSummary(BaseModel):
     symbol_count: int = Field(default=0, ge=0)
     unresolved_count: int = Field(default=0, ge=0)
     truncated: bool = False
+    async_hops: int = Field(default=0, ge=0, le=4)
+    cycle_bounded: bool = False
+    omitted_async_consumers: int = Field(default=0, ge=0)
 
 
 class ReviewCoverageRead(BaseModel):
@@ -408,6 +415,9 @@ class ReviewCoverageRead(BaseModel):
     fallback_unit_count: int = Field(default=0, ge=0)
     truncated_scenarios: int = Field(default=0, ge=0)
     unresolved_flow_regions: int = Field(default=0, ge=0)
+    average_source_chars_per_unit: int = Field(default=0, ge=0)
+    max_source_chars_per_unit: int = Field(default=0, ge=0)
+    async_composite_count: int = Field(default=0, ge=0)
 
 
 class ReviewRead(BaseModel):
@@ -448,6 +458,17 @@ class FindingEvidence(BaseModel):
     description: str
     file: str
     line: int = Field(ge=1)
+
+
+class FindingRelevantFlow(BaseModel):
+    """Compact, persisted entry path that reaches a finding root cause."""
+
+    scenario_id: str = Field(min_length=1, max_length=128)
+    entry_kind: str = Field(min_length=1, max_length=64)
+    entry_name: str = Field(min_length=1, max_length=240)
+    path: list[str] = Field(min_length=1, max_length=32)
+    relation_states: list[str] = Field(default_factory=list, max_length=32)
+    confidence: float = Field(default=1.0, ge=0, le=1)
 
 
 class FindingAssumption(BaseModel):
@@ -548,6 +569,8 @@ class FindingRead(BaseModel):
     verification: FindingVerification
     decision: FindingDecision
     topology_path: list[dict[str, object]] = Field(default_factory=list)
+    relevant_flows: list[FindingRelevantFlow] = Field(default_factory=list, max_length=8)
+    root_cause_key: str | None = Field(default=None, max_length=512)
     lifetime_evidence: list[dict[str, object]] = Field(default_factory=list)
     decision_reason: str | None
     resolution: FindingResolution = FindingResolution.OPEN

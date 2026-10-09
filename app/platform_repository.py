@@ -641,6 +641,34 @@ class PlatformRepository:
                 {**record, "payload_json": json.dumps(record["payload"]), "resolution_status": record.get("resolution", "OPEN"), "resolved_at": record.get("resolved_at")},
             )
 
+    def update_finding_relevant_flows(self, finding_id: str, project_id: str, root_cause_key: str,
+                                     relevant_flows: list[dict[str, Any]]) -> bool:
+        """Attach newly discovered bounded paths only to the matching root finding."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM findings WHERE id=? AND project_id=?",
+                (finding_id, project_id),
+            ).fetchone()
+            if not row:
+                return False
+            payload = json.loads(row["payload_json"])
+            if payload.get("root_cause_key") != root_cause_key:
+                return False
+            merged = list(payload.get("relevant_flows") or [])
+            known = {str(item.get("scenario_id")) for item in merged if isinstance(item, dict)}
+            for item in relevant_flows:
+                if len(merged) >= 8:
+                    break
+                if item.get("scenario_id") not in known:
+                    merged.append(item)
+                    known.add(str(item.get("scenario_id")))
+            payload["relevant_flows"] = merged
+            conn.execute(
+                "UPDATE findings SET payload_json=? WHERE id=? AND project_id=?",
+                (json.dumps(payload), finding_id, project_id),
+            )
+            return True
+
     def findings(self, project_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM findings WHERE project_id=? ORDER BY created_at DESC", (project_id,)).fetchall()
