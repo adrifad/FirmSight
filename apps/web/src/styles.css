@@ -727,6 +727,8 @@ dd { margin: 4px 0 0; color: var(--text-primary); font-size: 13px; font-weight: 
 .ai-run-state strong { font-size: 13.5px; }
 .ai-run-state p { margin: 5px 0 0; color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
 .ai-run-state .eyebrow { margin: 0; color: var(--brand-primary-deep); }
+.review-reconnecting { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 11px 14px; background: var(--surface); color: var(--text-secondary); font-size: 12.5px; }
+.review-reconnecting svg { flex: 0 0 auto; color: var(--brand-primary); }
 .yaml-running { min-height: 180px; margin: 20px; }
 
 .review-progress { position: relative; display: grid; gap: 12px; overflow: hidden; }

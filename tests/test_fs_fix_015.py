@@ -230,6 +230,32 @@ def test_heartbeat_advances_last_activity_while_units_are_in_flight(tmp_path, mo
         worker.join(timeout=10)
 
 
+def test_review_worker_is_deduplicated_and_live_without_status_polling(tmp_path, monkeypatch):
+    """A review worker owns its lifecycle independently of frontend GETs."""
+    repository, projects, project_id = _project(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    service = _service(repository, projects, BlockingProvider(entered, release))
+    monkeypatch.setattr(service, "HEARTBEAT_SECONDS", 0.15)
+    review = service.begin(project_id, ReviewCreate(scope="Full Project", focus=["concurrency"]))
+
+    worker = threading.Thread(target=service.execute, args=(review.id,), daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(timeout=5), "investigator never started"
+        service.execute(review.id)
+        _wait_until_in_flight(repository.database_path, review.id)
+        before = repository.get_review(review.id)["last_activity_at"]
+        assert _wait_for(lambda: repository.get_review(review.id)["last_activity_at"] != before, timeout=5)
+        # Read the durable repository state directly; no GET/status poll is
+        # needed to keep the review alive while its provider call is blocked.
+        assert repository.review_status(review.id) == "RUNNING"
+        assert review.id in service._active_review_workers
+    finally:
+        release.set()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+
+
 def test_except_exception_writes_failed_when_first_update_raises(tmp_path, monkeypatch):
     """REQ-5.4 / REQ-3: terminal FAILED is written even if the first write raises."""
     repository, projects, project_id = _project(tmp_path)

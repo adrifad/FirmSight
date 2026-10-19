@@ -205,6 +205,11 @@ class ReviewService:
         self.language_resolver: Callable[[], str] | None = language_resolver
         self._post_review_projection_locks: dict[str, _ThreadLock] = {}
         self._post_review_projection_registry_lock = self._post_review_projection_lock_registry_lock()
+        # Review execution is owned by the application service, not by the
+        # HTTP response or a frontend polling request. The persisted RUNNING
+        # status remains the durable recovery boundary after process restart.
+        self._worker_registry_lock = _ThreadLock()
+        self._active_review_workers: set[str] = set()
 
     def _locale(self) -> str:
         """UI language for user-facing review progress text (FS-I18N-016).
@@ -983,6 +988,25 @@ class ReviewService:
         )
 
     def execute(self, review_id: str) -> None:
+        """Run independently of status polling, with one worker per review.
+
+        FastAPI's response background callback is not cancelled by frontend
+        navigation, browser suspension, or status GET failures. This claim
+        prevents duplicate execution if a callback is registered more than once.
+        """
+        with self._worker_registry_lock:
+            if review_id in self._active_review_workers:
+                return
+            if self.repository.review_status(review_id) != "RUNNING":
+                return
+            self._active_review_workers.add(review_id)
+        try:
+            self._execute_claimed(review_id)
+        finally:
+            with self._worker_registry_lock:
+                self._active_review_workers.discard(review_id)
+
+    def _execute_claimed(self, review_id: str) -> None:
         review = self.get(review_id)
         if review.status != "RUNNING":
             return
