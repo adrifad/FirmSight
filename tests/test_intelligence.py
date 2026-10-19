@@ -77,10 +77,21 @@ VERIFY_NEW = json.dumps({
     "target_id": None,
     "confidence": 0.9,
     "source_support": "SUPPORTED",
-    "valid_evidence": [{"file": "src/main.c", "line": 6, "description": "Current source still contains the unreleased take."}],
+    "valid_evidence": [{"file": "src/main.c", "line": 4, "line_end": 7, "excerpt": "  xSemaphoreTake(ota_mutex, portMAX_DELAY);\n  esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);\n  if (err != ESP_OK) {\n    return err;", "description": "xSemaphoreTake is followed by esp_ota_begin and an error return before any give."}],
     "conflict_target_id": None,
     "conflict_evidence": [],
     "rationale": "Current source confirms the failure path; disproof attempts found no release.",
+})
+
+VERIFY_FIXED = json.dumps({
+    "action": "VERIFY_NEW",
+    "target_id": None,
+    "confidence": 0.9,
+    "source_support": "SUPPORTED",
+    "valid_evidence": [{"file": "src/main.c", "line": 6, "line_end": 9, "excerpt": "  if (err != ESP_OK) {\n    xSemaphoreGive(ota_mutex);\n    return err;\n  }", "description": "xSemaphoreGive executes inside the error branch before return."}],
+    "conflict_target_id": None,
+    "conflict_evidence": [],
+    "rationale": "Current source confirms the mutex is released on the error path.",
 })
 
 ACCEPT_PROVISIONAL = json.dumps({
@@ -112,7 +123,7 @@ MARK_CONFLICTED = json.dumps({
     "source_support": "CONTRADICTED",
     "valid_evidence": [],
     "conflict_target_id": None,
-    "conflict_evidence": [{"file": "src/main.c", "line": 6, "description": "Current source releases the mutex on every path."}],
+    "conflict_evidence": [{"file": "src/main.c", "line": 7, "line_end": 8, "excerpt": "    xSemaphoreGive(ota_mutex);\n    return err;", "description": "xSemaphoreGive releases the mutex before the error return."}],
     "rationale": "Current source contradicts the recorded pattern.",
 })
 
@@ -267,7 +278,7 @@ def test_weak_rejection_never_becomes_knowledge(tmp_path):
 def test_grounded_rejection_learns_false_positive(tmp_path):
     api = learning_app(tmp_path, [
         json.dumps({"candidates": [{**CANDIDATE, "type": "FALSE_POSITIVE_KNOWLEDGE", "statement": "OTA mutex warnings on ota_install are false positives: the mutex is released on the error path in current source."}]}),
-        VERIFY_NEW,
+        VERIFY_FIXED,
     ])
     root = make_workspace(tmp_path, FIXED_SOURCE)
     project = api.post("/api/projects/import-directory", json={"directory": str(root / "ota-device")}).json()
@@ -337,7 +348,8 @@ def test_revalidate_endpoint_conflicts_on_contradicted_source(tmp_path):
     api = learning_app(tmp_path, [
         json.dumps({"candidates": [CANDIDATE]}),
         VERIFY_NEW,          # creation-time verifier: source still buggy
-        MARK_CONFLICTED,     # revalidate-time verifier: source now fixed
+        json.dumps({"candidates": []}),  # source-change learning is now automatic
+        MARK_CONFLICTED,     # manual revalidation verifier: source now fixed
     ])
     root = make_workspace(tmp_path)
     project = api.post("/api/projects/import-directory", json={"directory": str(root / "ota-device")}).json()
@@ -433,6 +445,29 @@ def test_verifier_cannot_verify_without_current_source_support(tmp_path):
     assert records["counts"]["provisional"] == 1
 
 
+def test_verifier_evidence_requires_relevant_exact_current_excerpt():
+    from app.intelligence_schemas import VerificationEvidence
+    from app.intelligence_service import IntelligenceService
+
+    files = {"src/main.c": {"content": SOURCE, "content_hash": "current-hash"}}
+    irrelevant = VerificationEvidence(
+        file="src/main.c", line=7, excerpt="    return err;",
+        description="Current source releases the mutex before returning.",
+    )
+    supported = VerificationEvidence(
+        file="src/main.c", line=4, line_end=7,
+        excerpt="  xSemaphoreTake(ota_mutex, portMAX_DELAY);\n  esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);\n  if (err != ESP_OK) {\n    return err;",
+        description="xSemaphoreTake is followed by esp_ota_begin and an error return before any give.",
+    )
+
+    assert not IntelligenceService._verification_evidence_is_valid(
+        type("Verification", (), {"valid_evidence": [irrelevant]})(), files
+    )
+    assert IntelligenceService._verification_evidence_is_valid(
+        type("Verification", (), {"valid_evidence": [supported]})(), files
+    )
+
+
 def test_solved_finding_resolution_pattern(tmp_path):
     api = learning_app(tmp_path, [
         json.dumps({"candidates": [{**CANDIDATE, "type": "RESOLUTION_PATTERN", "statement": "Releasing the OTA mutex on the esp_ota_begin error path resolves the deadlock risk."}]}),
@@ -449,28 +484,6 @@ def test_solved_finding_resolution_pattern(tmp_path):
     records = api.get(f"/api/projects/{project['id']}/intelligence").json()
     assert records["counts"]["verified"] == 1
     assert records["records"][0]["type"] == "RESOLUTION_PATTERN"
-
-
-def test_chat_eligibility_grounded_claim_only(tmp_path):
-    api = learning_app(tmp_path, [
-        json.dumps({"candidates": [CANDIDATE]}),
-        ACCEPT_PROVISIONAL,
-    ])
-    project = api.post("/api/projects/import-directory", json={"directory": str(tmp_path / "firmware-workspace" / "ota-device")}).json()
-
-    def chat(message: str, **extra):
-        return api.post(f"/api/projects/{project['id']}/chat", json={"message": message, **extra})
-
-    assert chat("hi").status_code in {200, 503}
-    generic = chat("What does this project do?")
-    assert generic.status_code in {200, 503}
-    grounded = chat("I think the ota_install mutex leak is real because the error path in src/main.c returns without releasing it", selected_file="src/main.c")
-    assert grounded.status_code == 200, grounded.text
-
-    records = api.get(f"/api/projects/{project['id']}/intelligence").json()
-    statements = [record["statement"] for record in records["records"]]
-    assert len(statements) == 1, "only the grounded claim may learn"
-    assert records["counts"]["provisional"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +708,7 @@ class PipelineProvider:
 
 
 def supersession_app(tmp_path: Path):
-    replacement = {**CANDIDATE, "statement": "OTA mutex take on ota_install is released on every path in the current source; the earlier leak no longer applies."}
+    replacement = {**CANDIDATE, "statement": "ota_install acquires ota_mutex, calls esp_ota_begin, and returns err directly when begin fails."}
     app_pipeline = PipelineProvider(
         [json.dumps({"candidates": [CANDIDATE]}), json.dumps({"candidates": [replacement]})],
         [
@@ -704,7 +717,7 @@ def supersession_app(tmp_path: Path):
                 "action": "SUPERSEDE_EXISTING",
                 "confidence": 0.9,
                 "source_support": "SUPPORTED",
-                "valid_evidence": [{"file": "src/main.c", "line": 6, "description": "Current source releases the mutex on every path."}],
+                "valid_evidence": [{"file": "src/main.c", "line": 4, "line_end": 7, "excerpt": "  xSemaphoreTake(ota_mutex, portMAX_DELAY);\n  esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);\n  if (err != ESP_OK) {\n    return err;", "description": "xSemaphoreTake is followed by esp_ota_begin and an error return before any give."}],
                 "conflict_target_id": None,
                 "conflict_evidence": [],
                 "rationale": "The old statement no longer describes current source; this replacement is directly supported.",
@@ -728,16 +741,16 @@ def supersession_app(tmp_path: Path):
 def test_supersession_transitions_prior_record_and_replaces_retrieval(tmp_path):
     api = supersession_app(tmp_path)
     project = api.post("/api/projects/import-directory", json={"directory": str(tmp_path / "firmware-workspace" / "ota-device")}).json()
+    configured = api.put("/api/settings/knowledge-base", json={"root": str(tmp_path / "vault")})
+    assert configured.status_code == 200, configured.text
     run_review(api, project["id"])
     old_record = api.get(f"/api/projects/{project['id']}/intelligence").json()["records"][0]
     assert old_record["state"] == "VERIFIED"
 
-    # A grounded engineer claim triggers the superseding learning run.
-    chat = api.post(f"/api/projects/{project['id']}/chat", json={
-        "message": "I think the ota_install mutex pattern changed because the error path in src/main.c now releases the mutex",
-        "selected_file": "src/main.c",
-    })
-    assert chat.status_code == 200, chat.text
+    # An accepted finding decision triggers the superseding learning run.
+    finding = finding_id(api, project["id"])
+    decision = api.patch(f"/api/projects/{project['id']}/findings/{finding}/decision", json={"decision": "ACCEPTED"})
+    assert decision.status_code == 200, decision.text
     records = api.get(f"/api/projects/{project['id']}/intelligence").json()["records"]
     superseded = [record for record in records if record["state"] == "SUPERSEDED"]
     assert superseded, records
@@ -746,6 +759,12 @@ def test_supersession_transitions_prior_record_and_replaces_retrieval(tmp_path):
     assert replacement_id and replacement_id != old_id
     replacement = next(record for record in records if record["id"] == replacement_id)
     assert replacement["state"] == "VERIFIED"
+    memory = api.app.state.services.memory_repository
+    sync_state = memory.get_knowledge_sync_state(project["id"])
+    assert sync_state and sync_state["status"] == "SYNCED", sync_state
+    document = memory.get_knowledge_document_by_intelligence(replacement_id)
+    assert document is not None, "finding decision learning must project new knowledge to Markdown"
+    assert any(chunk.get("intelligence_id") == replacement_id for chunk in memory.list_knowledge_chunks(project["id"])), "projected knowledge must be incrementally indexed"
     detail = api.get(f"/api/intelligence/{old_id}").json()
     assert any(observation["kind"] == "SUPERSESSION" for observation in detail["observations"])
     supersede_links = [link for record in records for link in record["links"] if link["role"] == "SUPERSEDES"]
@@ -764,9 +783,8 @@ def test_supersession_transitions_prior_record_and_replaces_retrieval(tmp_path):
     assert replacement_id in retrieved_ids
 
 
-def test_candidate_time_conflict_uses_conflict_target_id(tmp_path):
-    """A verifier MARK_CONFLICTED pointing at conflict_target_id transitions the
-    intended shortlisted record with persisted, index-resolvable evidence."""
+def test_unquoted_irrelevant_conflict_line_cannot_demote_record(tmp_path):
+    """A valid line number without a matching, relevant source excerpt is not proof."""
     conflicting_pipeline = PipelineProvider(
         [
             json.dumps({"candidates": [CANDIDATE]}),
@@ -801,7 +819,8 @@ def test_candidate_time_conflict_uses_conflict_target_id(tmp_path):
     run_review(api, project["id"])
     first_id = api.get(f"/api/projects/{project['id']}/intelligence").json()["records"][0]["id"]
 
-    # Second review re-runs learning; the verifier conflicts record A by id.
+    # The model points to an existing return line but supplies no exact excerpt.
+    # That location alone must not be enough to conflict record A.
     review = api.post(f"/api/projects/{project['id']}/reviews", json={"focus": ["ota"]}).json()
     import time
     for _ in range(60):
@@ -810,9 +829,8 @@ def test_candidate_time_conflict_uses_conflict_target_id(tmp_path):
             break
         time.sleep(0.05)
     detail = api.get(f"/api/intelligence/{first_id}").json()
-    assert detail["state"] == "CONFLICTED", detail["state"]
-    assert detail["conflicts"], "conflict evidence must be persisted"
-    assert any(observation["kind"] == "CONFLICT" for observation in detail["observations"])
+    assert detail["state"] == "VERIFIED", detail["state"]
+    assert detail["conflicts"] == []
 
     from app.intelligence_service import IntelligenceService
     from app.repository import MemoryRepository
@@ -821,12 +839,12 @@ def test_candidate_time_conflict_uses_conflict_target_id(tmp_path):
     from app.indexer import FirmwareIndexer
     database = str(tmp_path / "firmsight.db")
     service = IntelligenceService(MemoryRepository(database), PlatformRepository(database), ProjectService(PlatformRepository(database), FirmwareIndexer(), str(tmp_path / "firmware-workspace")), lambda role: ScriptedProvider([]))
-    assert service.relevant_records(project["id"], ["ota_install"]) == []
+    assert first_id in {record["id"] for record in service.relevant_records(project["id"], ["ota_install"])}
 
 
 def test_learning_enqueue_failure_never_fails_domain_results(tmp_path):
     """Forced IntelligenceService failure: decisions/resolutions/fix-verification
-    and chat still return their normal successful payloads."""
+    still return their normal successful payloads."""
     def resolve(role: str) -> AIProvider:
         if role in {"memory_synthesizer", "memory_verifier"}:
             return FailingProvider()
@@ -856,141 +874,9 @@ def test_learning_enqueue_failure_never_fails_domain_results(tmp_path):
     verified = api.post(f"/api/projects/{project['id']}/findings/{finding}/verify-fix")
     assert verified.status_code in {200, 409, 502}, verified.text  # domain outcome preserved
 
-    # Eligible chat: response must survive even though learning will fail.
-    chat = api.post(f"/api/projects/{project['id']}/chat", json={
-        "message": "I think ota_install is now safe because the error path releases ota_mutex in src/main.c",
-        "selected_file": "src/main.c",
-    })
-    assert chat.status_code == 200, chat.text
-    assert chat.json()["message"]["role"] == "assistant"
-
     # No fabricated intelligence rows from the failing pipeline.
     records = api.get(f"/api/projects/{project['id']}/intelligence").json()
     assert records["counts"]["total"] == 0
-
-
-def test_chat_intelligence_retrieval_includes_symbol_mentions(tmp_path):
-    """(a) selected-finding chat and (b) plain message naming an indexed symbol
-    both receive state-labelled relevant intelligence; unrelated and terminal
-    states stay out."""
-    from app.intelligence_service import IntelligenceService
-    from app.repository import MemoryRepository
-    from app.platform_repository import PlatformRepository
-    from app.project_service import ProjectService
-    from app.indexer import FirmwareIndexer
-    from app.platform_schemas import ChatRequest
-
-    database = str(tmp_path / "firmsight.db")
-    platform = PlatformRepository(database)
-    memory_repo = MemoryRepository(database)
-    root = make_workspace(tmp_path)
-    projects = ProjectService(platform, FirmwareIndexer(), str(root))
-    api = learning_app(tmp_path, [])
-    project = api.post("/api/projects/import-directory", json={"directory": str(root / "ota-device")}).json()
-    service = IntelligenceService(memory_repo, platform, projects, lambda role: ScriptedProvider([]))
-    project_id = project["id"]
-    now = "2026-09-12T00:00:00+00:00"
-
-    def seed(statement: str, state: str, symbol: str, file: str) -> str:
-        memory_id = f"MEM-{abs(hash(statement)) % 100000:05d}"
-        fingerprint = compute_fingerprint(project_id, "BUG_PATTERN", statement, [symbol], [f"{file}:6"])
-        memory_repo.create_memory({
-            "id": memory_id, "project_id": project_id, "type": "BUG_PATTERN", "statement": statement,
-            "scope": {"type": "SYMBOL", "symbol": symbol},
-            "evidence": [{"symbol": symbol, "file": file, "line": 6, "description": "seed"}],
-            "source": {"type": "AUTOMATIC", "finding_id": None, "engineer_note": "seed"},
-            "status": "ACTIVE" if state in {"VERIFIED", "REINFORCED"} else state,
-            "state": state, "proposed_by": "AI", "approved_by": "AUTOMATIC", "commit_sha": None,
-            "created_at": now, "updated_at": now, "confidence": 0.8, "origin": "SYNTHESIZER",
-            "observation_count": 2, "reinforcement_count": 1, "fingerprint": fingerprint,
-        })
-        memory_repo.add_intelligence_links([
-            {"memory_id": memory_id, "project_id": project_id, "link_kind": "SYMBOL", "link_value": symbol, "role": "PRIMARY", "created_at": now},
-            {"memory_id": memory_id, "project_id": project_id, "link_kind": "FILE", "link_value": file, "role": "SUPPORTING", "created_at": now},
-        ])
-        return memory_id
-
-    verified_related = seed("Verified mutex ownership pattern for ota_install.", "VERIFIED", "ota_install", "src/main.c")
-    seed("Reinforced queue-depth pattern.", "REINFORCED", "measurement_queue", "src/measurement.c")
-    seed("Stale guidance.", "NEEDS_REVALIDATION", "ota_install", "src/main.c")
-    seed("Superseded pattern.", "SUPERSEDED", "ota_install", "src/main.c")
-    seed("Disabled pattern.", "DISABLED", "ota_install", "src/main.c")
-    seed("Provisional pattern.", "PROVISIONAL", "ota_install", "src/main.c")
-
-    # (a) message naming an indexed symbol, no selected file or finding.
-    by_symbol = service.chat_intelligence_context(project_id, ["ota_install", "src/main.c"])
-    assert "Verified mutex ownership pattern" in by_symbol
-    assert "Unrelated" not in by_symbol or "queue-depth" not in by_symbol
-    assert "Stale" not in by_symbol and "Superseded" not in by_symbol
-    assert "Disabled" not in by_symbol and "Provisional" not in by_symbol
-
-    # (b) unrelated link values retrieve nothing for this project's records.
-    unrelated = service.chat_intelligence_context(project_id, ["mqtt_handler", "src/mqtt.c"])
-    assert "Verified mutex ownership pattern" not in unrelated
-
-    # Chat eligibility payload derivation also resolves from a bare symbol mention.
-    request = ChatRequest(message="I think ota_install is fine because the mutex is released in src/main.c", selected_file=None, finding_id=None)
-    payload = service.chat_candidate_payload(project_id, request, "MSG-1", "MSG-2")
-    assert payload is not None, "symbol-grounded claim must qualify"
-
-
-
-def test_finding_focus_chat_receives_relevant_intelligence(tmp_path):
-    """PI-004(a): a chat carrying a finding_id injects state-labelled records
-    matching that finding's file/symbol links into the answer, while unrelated
-    knowledge stays out."""
-    from app.repository import MemoryRepository
-    from app.platform_schemas import ChatRequest
-
-    api = learning_app(tmp_path, [])
-    project = api.post("/api/projects/import-directory", json={"directory": str(tmp_path / "firmware-workspace" / "ota-device")}).json()
-    run_review(api, project["id"])
-    finding = finding_id(api, project["id"])
-    finding_obj = api.get(f"/api/projects/{project['id']}/findings/{finding}").json()
-    symbol = "ota_install"
-    file = finding_obj["location"]["file"]
-
-    database = str(tmp_path / "firmsight.db")
-    memory_repo = MemoryRepository(database)
-    now = "2026-09-12T00:00:00+00:00"
-    memory_repo.create_memory({
-        "id": "MEM-CHAT-VERIFIED", "project_id": project["id"], "type": "BUG_PATTERN",
-        "statement": "Ota install must release its mutex on the error path.",
-        "scope": {"type": "SYMBOL", "symbol": symbol},
-        "evidence": [{"symbol": symbol, "file": file, "line": 6, "description": "seed"}],
-        "source": {"type": "AUTOMATIC", "finding_id": None, "engineer_note": "seed"},
-        "status": "ACTIVE", "state": "VERIFIED", "proposed_by": "AI", "approved_by": "AUTOMATIC", "commit_sha": None,
-        "created_at": now, "updated_at": now, "confidence": 0.9, "origin": "SYNTHESIZER",
-        "observation_count": 1, "reinforcement_count": 1,
-        "fingerprint": compute_fingerprint(project["id"], "BUG_PATTERN", "Ota install must release its mutex on the error path.", [symbol], [f"{file}:6"]),
-    })
-    memory_repo.add_intelligence_links([
-        {"memory_id": "MEM-CHAT-VERIFIED", "project_id": project["id"], "link_kind": "SYMBOL", "link_value": symbol, "role": "PRIMARY", "created_at": now},
-        {"memory_id": "MEM-CHAT-VERIFIED", "project_id": project["id"], "link_kind": "FILE", "link_value": file, "role": "SUPPORTING", "created_at": now},
-    ])
-    # Unrelated verified record must not leak into the finding-scoped chat.
-    memory_repo.create_memory({
-        "id": "MEM-CHAT-UNRELATED", "project_id": project["id"], "type": "PROJECT_FACT",
-        "statement": "Mqtt reconnect backs off exponentially.",
-        "scope": {"type": "SYMBOL", "symbol": "mqtt_handler"},
-        "evidence": [{"symbol": "mqtt_handler", "file": "src/mqtt.c", "line": 3, "description": "seed"}],
-        "source": {"type": "AUTOMATIC", "finding_id": None, "engineer_note": "seed"},
-        "status": "ACTIVE", "state": "VERIFIED", "proposed_by": "AI", "approved_by": "AUTOMATIC", "commit_sha": None,
-        "created_at": now, "updated_at": now, "confidence": 0.9, "origin": "SYNTHESIZER",
-        "observation_count": 1, "reinforcement_count": 1,
-        "fingerprint": compute_fingerprint(project["id"], "PROJECT_FACT", "Mqtt reconnect backs off exponentially.", ["mqtt_handler"], ["src/mqtt.c:3"]),
-    })
-    memory_repo.add_intelligence_links([
-        {"memory_id": "MEM-CHAT-UNRELATED", "project_id": project["id"], "link_kind": "SYMBOL", "link_value": "mqtt_handler", "role": "PRIMARY", "created_at": now},
-        {"memory_id": "MEM-CHAT-UNRELATED", "project_id": project["id"], "link_kind": "FILE", "link_value": "src/mqtt.c", "role": "SUPPORTING", "created_at": now},
-    ])
-
-    response = api.post(f"/api/projects/{project['id']}/chat", json={"message": "Explain this finding", "finding_id": finding})
-    assert response.status_code == 200, response.text
-    answer = response.json()["message"]["content"]
-    assert "Ota install must release its mutex" in answer
-    assert "Mqtt reconnect backs off" not in answer
-
 
 
 def test_disable_endpoint_persists_reason_in_observation(tmp_path):
@@ -1094,8 +980,9 @@ def test_stale_exact_match_revalidates_in_place_not_duplicated(tmp_path):
     record revalidates that record; no duplicate fingerprint is created."""
     api = pipeline_app(tmp_path, [
         json.dumps({"candidates": [CANDIDATE]}),
+        json.dumps({"candidates": []}),  # automatic source-change learning
         json.dumps({"candidates": [CANDIDATE]}),  # same statement => same fingerprint
-    ], [VERIFY_NEW, VERIFY_NEW])
+    ], [VERIFY_NEW, VERIFY_FIXED])
     project_id, record_id = _seed_verified_record(api, tmp_path)
 
     # Change the source so the record is deterministically marked stale.
@@ -1179,11 +1066,7 @@ def test_learning_job_persistence_failure_never_fails_domain_results(tmp_path, m
     assert verified_fix.status_code in {200, 409, 502}, verified_fix.text
     assert verified_fix.status_code != 500
 
-    chat = api.post(f"/api/projects/{project['id']}/chat", json={
-        "message": "I think ota_install is safe because only the ota task takes the mutex in src/main.c",
-        "selected_file": "src/main.c",
-    })
-    assert chat.status_code == 200 and chat.json()["message"]["role"] == "assistant", chat.text
+    assert api.get(f"/api/projects/{project['id']}/chat").status_code == 404
 
     # Business state preserved (last durable decision was REJECTED; the finding
     # remains owned by the project); no intelligence fabricated from the failure.

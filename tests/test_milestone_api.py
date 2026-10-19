@@ -76,7 +76,7 @@ class FixtureProvider:
             return json.dumps({"verdict": "SURVIVES", "notes": "No alternate release is visible in the supplied source.", "remaining_assumptions": [{"statement": "No cleanup wrapper releases the mutex.", "status": "UNVERIFIED"}]})
         if "YAML Generator" in system_prompt:
             return json.dumps({"content": "version: 1\nproject:\n  name: \\\"OTA fixture\\\"\nplatform:\n  target: \\\"ESP32-S3\\\"\nanalysis:\n  focus:\n    - freertos\n"})
-        return "The configured fixture provider received the project-aware chat request."
+        return "The configured fixture provider received the project-aware model request."
 
 
 class ReReviewFixtureProvider(FixtureProvider):
@@ -693,9 +693,8 @@ void app_main(void) { xTaskCreate(measurement_task, \"measurement\", 4096, NULL,
     assert decision.status_code == 200, decision.text
     assert decision.json()["decision"] == "REJECTED"
 
-    chat = api.post(f"/api/projects/{project['id']}/chat", json={"message": "Why is this considered a bug?", "finding_id": finding["id"]})
-    assert chat.status_code == 200
-    assert "execution path" in chat.json()["message"]["content"].lower()
+    assert api.get(f"/api/projects/{project['id']}/chat").status_code == 404
+    assert api.post(f"/api/projects/{project['id']}/chat", json={"message": "Why is this considered a bug?", "finding_id": finding["id"]}).status_code == 404
 
     generated = api.post(f"/api/projects/{project['id']}/yaml/generate", json={"description": "ESP32-S3 runs a measurement task. MQTT monitoring must not interrupt it.", "focus": ["freertos", "mqtt"]})
     assert generated.status_code == 200, generated.text

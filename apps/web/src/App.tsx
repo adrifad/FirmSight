@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import Editor from '@monaco-editor/react'
-import { BadgeCheck, BrainCircuit, Check, ChevronRight, CircleAlert, Code2, FileCode2, FolderOpen, LoaderCircle, MessageSquareCode, Network, PanelLeft, Play, Plus, RefreshCcw, ScanSearch, Search, Settings2, ShieldCheck, Trash2, TriangleAlert, X } from 'lucide-react'
-import { api, type ChatMessage, type Finding, type FixVerificationEvidence, type FlowIndex, type FlowScenario, type IntelligenceRecord, type LearningSummary, type OutputBudget, type Project, type ProjectFile, type Review, type ReviewDiagnostic, type Symbol, type YamlResult } from './api'
+import { BadgeCheck, BrainCircuit, Check, ChevronRight, CircleAlert, Code2, FileCode2, FolderOpen, LoaderCircle, Network, PanelLeft, Play, Plus, RefreshCcw, ScanSearch, Search, Settings2, ShieldCheck, Trash2, TriangleAlert, X } from 'lucide-react'
+import { api, type Finding, type FixVerificationEvidence, type FlowIndex, type FlowScenario, type IntelligenceRecord, type LearningSummary, type OutputBudget, type Project, type ProjectFile, type Review, type ReviewDiagnostic, type YamlResult } from './api'
 import { AppSidebar, DesktopNav, type Page } from './components/AppSidebar'
 import logoUrl from './assets/firmsight-logo.png'
 import { DashboardPage } from './components/DashboardPage'
@@ -10,7 +10,7 @@ import { Empty, ErrorState, Loading } from './components/ui'
 import { translate } from './i18n'
 
 const globalPages: Page[] = ['dashboard', 'projects', 'settings']
-const pageLabels: Record<Page, string> = { dashboard: 'Dashboard', projects: 'Projects', overview: 'Overview', code: 'Code', review: 'AI Review', findings: 'Findings', chat: 'AI Chat', architecture: 'Architecture', memory: 'Project Intelligence', yaml: 'YAML Generator', settings: 'Settings' }
+const pageLabels: Record<Page, string> = { dashboard: 'Dashboard', projects: 'Projects', overview: 'Overview', code: 'Code', review: 'AI Review', findings: 'Findings', architecture: 'Architecture', 'rag-brain': 'RAG Brain', yaml: 'YAML Generator', settings: 'Settings' }
 
 function useAsync<T>(loader: () => Promise<T>, deps: unknown[]) {
   const [data, setData] = useState<T | null>(null); const [error, setError] = useState(''); const [loading, setLoading] = useState(false)
@@ -72,7 +72,7 @@ export default function App() {
         <header className="page-header"><div><p className="eyebrow">{eyebrow}</p><h1>{pageLabels[page]}</h1></div><div className="top-actions">{showNewProject && <button className="primary" onClick={() => setShowCreate(true)}><Plus size={16} /> New Project</button>}{onProjectPage && page !== 'review' && <button className="primary" onClick={() => navigate('review')}><Play size={16} /> Run Review</button>}</div></header>
         {toast && <div className="toast"><Check size={16} />{toast}<button onClick={() => setToast('')} aria-label="Dismiss message"><X size={15} /></button></div>}{projects.error && <ErrorState error={projects.error} retry={projects.run} />}
         {page === 'dashboard' && <DashboardPage projects={projects.data} loading={projects.loading} onOpen={openProject} onRunReview={runProjectReview} onCreate={() => setShowCreate(true)} onDelete={project => setDeleteTarget(project)} navigate={navigate} />}
-        {page === 'projects' && <ProjectsPage projects={projects.data ?? []} active={active} loading={projects.loading} onOpen={openProject} onCreate={() => setShowCreate(true)} refresh={projects.run} onDelete={project => setDeleteTarget(project)} />}{page === 'overview' && <OverviewPage project={active} navigate={navigate} />}{page === 'code' && <CodePage project={active} syncSource={syncSource} />}{page === 'review' && <ReviewPage project={active} navigate={navigate} notify={setToast} />}{page === 'findings' && <FindingsPage project={active} navigate={navigate} notify={setToast} />}{page === 'chat' && <ChatPage project={active} />}{page === 'architecture' && <ArchitecturePage project={active} />}{page === 'memory' && <ProjectIntelligencePage project={active} notify={setToast} />}{page === 'yaml' && <YamlPage project={active} notify={setToast} />}{page === 'settings' && <SettingsPage />}
+        {page === 'projects' && <ProjectsPage projects={projects.data ?? []} active={active} loading={projects.loading} onOpen={openProject} onCreate={() => setShowCreate(true)} refresh={projects.run} onDelete={project => setDeleteTarget(project)} />}{page === 'overview' && <OverviewPage project={active} navigate={navigate} />}{page === 'code' && <CodePage project={active} syncSource={syncSource} />}{page === 'review' && <ReviewPage project={active} navigate={navigate} notify={setToast} />}{page === 'findings' && <FindingsPage project={active} navigate={navigate} notify={setToast} />}{page === 'architecture' && <ArchitecturePage project={active} />}{page === 'rag-brain' && <RagBrainPage project={active} notify={setToast} />}{page === 'yaml' && <YamlPage project={active} notify={setToast} />}{page === 'settings' && <SettingsPage />}
       </main>
     </div>
     {showCreate && <CreateProjectDialog refresh={projects.run} onCreated={project => { setShowCreate(false); setActiveId(project.id); setPage('overview'); setToast(`${project.name} imported and indexed.`) }} onClose={() => setShowCreate(false)} />}
@@ -97,7 +97,7 @@ function DeleteProjectDialog({ project, onCancel, onDeleted }: { project: Projec
     setDeleting(false)
     await refreshList()
   }
-  return <div className="modal-backdrop" role="presentation"><section className="create-dialog delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-project-title"><div className="dialog-head"><div><p className="eyebrow">DESTRUCTIVE ACTION</p><h2 id="delete-project-title">Delete “{project.name}”?</h2></div><button className="icon-button" disabled={deleting} onClick={onCancel} aria-label="Close"><X size={17} /></button></div><p className="dialog-copy">This permanently deletes the FirmSight records stored for <strong>{project.name}</strong>: source index, reviews, findings and decisions, chat history, YAML generations, Project Intelligence knowledge, learning jobs, and review learning summaries. <strong>Your local firmware directory and its files are not deleted.</strong></p>{error && <div className="error"><CircleAlert size={16} />{error}</div>}<div className="dialog-actions"><button autoFocus={!error} disabled={deleting} onClick={onCancel}>{deleted ? 'Close' : 'Cancel'}</button>{deleted
+  return <div className="modal-backdrop" role="presentation"><section className="create-dialog delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-project-title"><div className="dialog-head"><div><p className="eyebrow">DESTRUCTIVE ACTION</p><h2 id="delete-project-title">Delete “{project.name}”?</h2></div><button className="icon-button" disabled={deleting} onClick={onCancel} aria-label="Close"><X size={17} /></button></div><p className="dialog-copy">This permanently deletes the FirmSight records stored for <strong>{project.name}</strong>: source index, reviews, findings and decisions, legacy chat history, YAML generations, RAG Brain knowledge, learning jobs, and review learning summaries. <strong>Your local firmware directory and its files are not deleted.</strong></p>{error && <div className="error"><CircleAlert size={16} />{error}</div>}<div className="dialog-actions"><button autoFocus={!error} disabled={deleting} onClick={onCancel}>{deleted ? 'Close' : 'Cancel'}</button>{deleted
     ? <button ref={actionRef} className="primary" disabled={deleting} onClick={() => void refreshList()}>{deleting ? <LoaderCircle className="spin" size={16} /> : <RefreshCcw size={16} />}{deleting ? 'Refreshing…' : 'Retry refresh'}</button>
     : <button ref={actionRef} className="reject-confirm" disabled={deleting} onClick={() => void confirm()}>{deleting ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}{deleting ? 'Deleting…' : 'Delete project'}</button>}</div></section></div> }
 
@@ -360,12 +360,10 @@ function RejectFindingDialog({ title, reason, error, saving, onReasonChange, onC
 function Detail({ label, children }: { label: string; children: ReactNode }) { return <section className="detail-section"><h3>{label}</h3>{children}</section> }
 function Evidence({ evidence }: { evidence: Finding['evidence'] }) { return <ul className="evidence">{evidence.map(item => <li key={`${item.file}:${item.line}`}><code>{item.file}:{item.line}</code>{item.description}</li>)}</ul> }
 
-function ChatPage({ project }: { project: Project | null }) { const messages = useAsync(() => project ? api.messages(project.id) : Promise.resolve([]), [project?.id]); const [text, setText] = useState(''); const [sending, setSending] = useState(false); const [error, setError] = useState(''); const send = async () => { if (!project || !text.trim()) return; setSending(true); setError(''); try { await api.chat(project.id, text.trim()); setText(''); await messages.run() } catch (err) { setError(err instanceof Error ? err.message : 'FirmSight could not send that message.') } finally { setSending(false) } }; if (!project) return <Empty title="No project conversation" detail="Select a project to ask FirmSight about its indexed source." icon={<MessageSquareCode size={27} />} />; return <section className="chat-shell"><div className="chat-context"><BrainCircuit size={17} /><span>Project-aware context · source and comments are untrusted data</span></div><div className="messages">{messages.loading ? <Loading /> : messages.error ? <ErrorState error={messages.error} retry={messages.run} /> : messages.data?.length ? messages.data.map((message: ChatMessage) => <article key={message.id} className={`message ${message.role}`}><strong>{message.role === 'assistant' ? 'FirmSight' : 'You'}</strong><p>{message.content}</p></article>) : <Empty title="Ask about this firmware" detail="Ask about execution paths, project architecture, or assumptions in a finding." icon={<MessageSquareCode size={27} />} />}</div>{error && <div className="error chat-error"><CircleAlert size={16} />{error}</div>}<div className="chat-compose"><textarea value={text} onChange={event => setText(event.target.value)} placeholder="Ask FirmSight about this project…" onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} /><button className="primary" onClick={() => void send()} disabled={sending || !text.trim()}>{sending ? <LoaderCircle className="spin" size={16} /> : <ChevronRight size={16} />}</button></div></section> }
-
 function ArchitecturePage({ project }: { project: Project | null }) {
   const flow = useAsync(() => project ? api.flows(project.id) : Promise.resolve(null), [project?.id])
   const [selectedId, setSelectedId] = useState('')
-  const scenarios = flow.data?.scenarios ?? []
+  const scenarios = useMemo(() => flow.data?.scenarios ?? [], [flow.data?.scenarios])
   useEffect(() => { if (!scenarios.some(item => item.id === selectedId)) setSelectedId(scenarios[0]?.id ?? '') }, [scenarios, selectedId])
   if (!project) return <Empty title="No architecture context" detail="Select a project to inspect indexed firmware flows." icon={<Network size={27} />} />
   if (flow.loading) return <Loading />
@@ -384,14 +382,6 @@ function ArchitecturePage({ project }: { project: Project | null }) {
   </section>
 }
 
-const INTELLIGENCE_GROUPS: { label: string; types: string[] }[] = [
-  { label: 'Project behaviors', types: ['PROJECT_FACT', 'BEHAVIORAL_PATTERN', 'DESIGN_INTENT'] },
-  { label: 'False-positive knowledge', types: ['FALSE_POSITIVE_KNOWLEDGE'] },
-  { label: 'Recurring bug patterns', types: ['BUG_PATTERN'] },
-  { label: 'Resolution patterns', types: ['RESOLUTION_PATTERN'] },
-  { label: 'Architecture knowledge', types: ['ARCHITECTURAL_PATTERN'] },
-  { label: 'Review lessons', types: ['REVIEW_LESSON'] },
-]
 const STATE_LABELS: Record<string, string> = { PROVISIONAL: 'Provisional', REINFORCED: 'Reinforced', VERIFIED: 'Verified', NEEDS_REVALIDATION: 'Needs revalidation', CONFLICTED: 'Conflicted', SUPERSEDED: 'Superseded', DISABLED: 'Disabled' }
 const INTELLIGENCE_STATES = ['', 'PROVISIONAL', 'REINFORCED', 'VERIFIED', 'NEEDS_REVALIDATION', 'CONFLICTED', 'SUPERSEDED', 'DISABLED']
 const INTELLIGENCE_TYPES = ['', 'PROJECT_FACT', 'DESIGN_INTENT', 'FALSE_POSITIVE_KNOWLEDGE', 'BUG_PATTERN', 'RESOLUTION_PATTERN', 'ARCHITECTURAL_PATTERN', 'BEHAVIORAL_PATTERN', 'REVIEW_LESSON']
@@ -404,7 +394,7 @@ function formatWhen(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
-function ProjectIntelligencePage({ project, notify }: { project: Project | null; notify: (message: string) => void }) {
+function RagBrainPage({ project, notify }: { project: Project | null; notify: (message: string) => void }) {
   const [stateFilter, setStateFilter] = useState(''); const [typeFilter, setTypeFilter] = useState('')
   const list = useAsync(() => project ? api.intelligence(project.id, stateFilter || undefined, typeFilter || undefined) : Promise.resolve(null), [project?.id, stateFilter, typeFilter])
   const summary = useAsync(() => project ? api.intelligenceSummary(project.id) : Promise.resolve(null), [project?.id])
@@ -414,9 +404,42 @@ function ProjectIntelligencePage({ project, notify }: { project: Project | null;
   const [disableTarget, setDisableTarget] = useState<IntelligenceRecord | null>(null)
   const [disableReason, setDisableReason] = useState('')
   const detail = useAsync(() => selectedId ? api.intelligenceDetail(selectedId) : Promise.resolve(null), [selectedId])
+  const documents = useAsync(() => project ? api.knowledgeDocuments(project.id) : Promise.resolve([]), [project?.id])
+  const syncState = useAsync(() => project ? api.knowledgeSyncState(project.id) : Promise.resolve(null), [project?.id])
+  const selectedDocument = documents.data?.find(document => document.intelligence_id === selectedId)
+  const documentDetail = useAsync(() => selectedDocument && project ? api.knowledgeDocument(project.id, selectedDocument.id) : Promise.resolve(null), [project?.id, selectedDocument?.id])
+  const graph = useAsync(() => project ? api.relationships(project.id) : Promise.resolve(null), [project?.id])
+  const traces = useAsync(() => project ? api.retrievalTraces(project.id) : Promise.resolve({ traces: [] }), [project?.id])
+  const [graphFilter, setGraphFilter] = useState('')
+  const [query, setQuery] = useState('')
+  const [querySymbols, setQuerySymbols] = useState('')
+  const [queryFiles, setQueryFiles] = useState('')
+  const [queryComponent, setQueryComponent] = useState('')
+  const [retrieval, setRetrieval] = useState<Awaited<ReturnType<typeof api.inspectRetrieval>> | null>(null)
+  const [inspecting, setInspecting] = useState(false)
+  const [inspectorError, setInspectorError] = useState('')
+  const [selectedTraceId, setSelectedTraceId] = useState('')
+  const traceDetail = useAsync(() => project && selectedTraceId ? api.retrievalTrace(project.id, selectedTraceId) : Promise.resolve(null), [project?.id, selectedTraceId])
+  const [syncing, setSyncing] = useState(false)
+  useEffect(() => { if (!selectedTraceId && traces.data?.traces[0]) setSelectedTraceId(traces.data.traces[0].id) }, [selectedTraceId, traces.data])
   const [statement, setStatement] = useState(''); const [symbol, setSymbol] = useState(''); const [note, setNote] = useState(''); const [proposal, setProposal] = useState('')
   useEffect(() => { setSelectedId(''); setActionError(''); setDisableTarget(null); setDisableReason(''); setStatement(''); setSymbol(''); setNote(''); setProposal('') }, [project?.id])
-  const refresh = async () => { await Promise.all([list.run(), summary.run()]); if (selectedId) await detail.run() }
+  const refresh = async () => { await Promise.all([list.run(), summary.run(), documents.run(), syncState.run(), graph.run(), traces.run()]); if (selectedId) await detail.run() }
+  useEffect(() => { if (!list.loading && !selectedId && list.data?.records[0]) setSelectedId(list.data.records[0].id) }, [list.loading, list.data, selectedId])
+  const inspect = async () => {
+    if (!project) return
+    setInspecting(true); setInspectorError('')
+    try { setRetrieval(await api.inspectRetrieval(project.id, { project_id: project.id, query, symbols: querySymbols.split(',').map(value => value.trim()).filter(Boolean), files: queryFiles.split(',').map(value => value.trim()).filter(Boolean), component: queryComponent.trim() || undefined, cap: 12 })) }
+    catch (err) { setInspectorError(err instanceof Error ? err.message : 'Retrieval inspection failed.') }
+    finally { setInspecting(false) }
+  }
+  const retrySync = async () => {
+    if (!project) return
+    setSyncing(true)
+    try { const result = await api.retryKnowledgeIndex(project.id); notify(`Vault ${result.vault.toLowerCase()}, RAG index ${result.index.toLowerCase()}.`); await refresh() }
+    catch (err) { setActionError(err instanceof Error ? err.message : 'Knowledge sync failed.') }
+    finally { setSyncing(false) }
+  }
   const revalidate = async (record: IntelligenceRecord) => {
     if (!project) return
     setPendingAction(`revalidate:${record.id}`); setActionError('')
@@ -448,20 +471,17 @@ function ProjectIntelligencePage({ project, notify }: { project: Project | null;
   const ignore = async () => {
     try { await api.ignoreMemoryProposal(proposal); setProposal('') } catch (err) { setActionError(err instanceof Error ? err.message : 'Unable to ignore proposal') }
   }
-  if (!project) return <Empty title="No Project Intelligence context" detail="Select a project to see what FirmSight has learned about it." icon={<BrainCircuit size={27} />} />
+  if (!project) return <Empty title="No RAG Brain context" detail="Select a project to inspect source-grounded knowledge and retrieval." icon={<BrainCircuit size={27} />} />
   const records = list.data?.records ?? []
   const counts = summary.data?.counts
-  const grouped = INTELLIGENCE_GROUPS.map(group => ({ ...group, items: records.filter(record => group.types.includes(record.type)) })).filter(group => group.items.length > 0)
-  const ungrouped = records.filter(record => !INTELLIGENCE_GROUPS.some(group => group.types.includes(record.type)))
+  const visibleGraphNodes = graph.data?.nodes.filter(node => !graphFilter.trim() || `${node.kind} ${node.label} ${node.path ?? ''}`.toLowerCase().includes(graphFilter.trim().toLowerCase())) ?? []
+  const visibleNodeIds = new Set(visibleGraphNodes.map(node => node.id))
+  const visibleGraphEdges = graph.data?.edges.filter(edge => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)) ?? []
+  const lifecycleCounts = counts ? [['VERIFIED', counts.verified], ['REINFORCED', counts.reinforced], ['PROVISIONAL', counts.provisional], ['NEEDS_REVALIDATION', counts.needs_revalidation], ['CONFLICTED', counts.conflicted], ['SUPERSEDED', counts.superseded], ['DISABLED', counts.disabled]] as const : []
   return <section className="page-stack">
-    <div className="section-head"><div><h2>What FirmSight has learned about {project.name}</h2><p>Automatic knowledge starts provisional and is never treated as fact. The skeptic verifier and current source decide when it is reinforced or verified; engineers can inspect, revalidate, or disable it.</p></div><button className="icon-button" title="Reload Project Intelligence" onClick={() => void refresh()}><RefreshCcw size={16} /></button></div>
-    {summary.loading ? null : summary.error ? <ErrorState error={summary.error} retry={summary.run} /> : counts && <div className="metric-grid">
-      <MetricCard label="Learned knowledge" value={counts.total - counts.superseded - counts.disabled} detail="Active records across all states" />
-      <MetricCard label="Verified" value={counts.verified} detail="Confirmed by current source" />
-      <MetricCard label="Reinforced" value={counts.reinforced} detail="Multiple independent observations" />
-      <MetricCard label="Needs revalidation" value={counts.needs_revalidation} detail="Evidence changed or is missing" tone={counts.needs_revalidation > 0 ? 'attention' : 'default'} />
-      <MetricCard label="Conflicted" value={counts.conflicted} detail="Contradicted by current source" tone={counts.conflicted > 0 ? 'attention' : 'default'} />
-    </div>}
+    <div className="brain-intro"><div><p className="brain-kicker">SOURCE FIRST / KNOWLEDGE SECOND</p><h2>What {project.name} has taught FirmSight</h2><p>Inspect each claim against its source evidence, then follow the retrieval traces that show how it entered review context.</p></div><button className="quiet" title="Reload RAG Brain evidence" onClick={() => void refresh()}><RefreshCcw size={15} /> Refresh</button></div>
+    {syncState.data && <div className={`brain-sync ${syncState.data.status.toLowerCase()}`}><span>Vault + index</span><strong>{syncState.data.status.replaceAll('_', ' ')}</strong><small>{syncState.data.updated_at ? `Updated ${formatWhen(syncState.data.updated_at)}` : 'No durable sync timestamp'}</small><button disabled={syncing} onClick={() => void retrySync()}>{syncing ? 'Syncing…' : 'Retry sync'}</button></div>}
+    {summary.loading ? null : summary.error ? <ErrorState error={summary.error} retry={summary.run} /> : counts && <section className="brain-health" aria-label="Knowledge lifecycle counts">{lifecycleCounts.map(([state, value]) => <div key={state} className={`brain-health-item ${state.toLowerCase()}`}><span>{STATE_LABELS[state]}</span><strong>{value}</strong></div>)}</section>}
     {summary.data && summary.data.health.open_conflicts > 0 && <div className="error"><CircleAlert size={16} /><span>{summary.data.health.open_conflicts} open conflict{summary.data.health.open_conflicts === 1 ? '' : 's'} need engineer attention. Inspect the conflicted records below.</span></div>}
     <div className="intel-toolbar" role="search">
       <label>State<select value={stateFilter} onChange={event => setStateFilter(event.target.value)}><option value="">All states</option>{INTELLIGENCE_STATES.filter(Boolean).map(state => <option key={state} value={state}>{STATE_LABELS[state]}</option>)}</select></label>
@@ -470,16 +490,15 @@ function ProjectIntelligencePage({ project, notify }: { project: Project | null;
     </div>
     {actionError && <div className="error"><CircleAlert size={16} />{actionError}</div>}
     {list.loading ? <Loading /> : list.error ? <ErrorState error={list.error} retry={list.run} /> : records.length === 0
-      ? <Empty title="No project intelligence yet." detail="FirmSight learns automatically from completed reviews, finding decisions, verified fixes, and grounded chat. Nothing is stored without evidence, and automatic knowledge never starts as fact." icon={<BrainCircuit size={27} />} />
-      : <div className="intelligence-list">{[...grouped, ...(ungrouped.length ? [{ label: 'Other knowledge', types: [], items: ungrouped }] : [])].map(group => <div key={group.label} className="intel-group">
-        <p className="section-label">{group.label.toUpperCase()} · {group.items.length}</p>
-        {group.items.map(record => <article key={record.id} className={`intel-card${selectedId === record.id ? ' selected' : ''}`}>
+      ? <Empty title="No learned knowledge yet." detail="Completed reviews, finding decisions, verified fixes, and source revalidation can add evidence here. No sample records are shown." icon={<BrainCircuit size={27} />} />
+      : <div className="brain-records">{records.map(record => <article key={record.id} className={`intel-card${selectedId === record.id ? ' selected' : ''}`}>
           <div className="intel-card-head"><StateBadge state={record.state} /><span className="source-tag">{record.type.replaceAll('_', ' ').toLowerCase()}</span><strong className="confidence-mini">{Math.round(record.confidence * 100)}%</strong></div>
           <p className="intel-statement">{record.statement}</p>
           <div className="intel-meta">
             <span>{record.observation_count} observation{record.observation_count === 1 ? '' : 's'}{record.reinforcement_count > 0 ? ` · ${record.reinforcement_count} independent` : ''}</span>
             <span>origin: {record.origin === 'SYNTHESIZER' ? 'automatic' : record.origin === 'LEGACY_ENGINEER_APPROVED' ? 'engineer (legacy)' : 'engineer'}</span>
-            <span>last validated: {formatWhen(record.last_validated_at)}{record.last_validated_commit ? ` @ ${record.last_validated_commit.slice(0, 8)}` : ''}</span>
+            <span>validated: {formatWhen(record.last_validated_at)}{record.last_validated_commit ? ` · snapshot ${record.last_validated_commit}` : ''}</span>
+            {(record.linked_finding_ids.length > 0 || record.linked_review_ids.length > 0) && <span>{record.linked_finding_ids.slice(0, 2).map(id => `finding ${id}`).concat(record.linked_review_ids.slice(0, 2).map(id => `review ${id}`)).join(' · ')}</span>}
           </div>
           {(record.links.length > 0 || record.last_evidence.length > 0) && <div className="intel-links">
             {record.links.filter(link => link.link_kind === 'SYMBOL' || link.link_kind === 'COMPONENT').slice(0, 4).map(link => <code key={link.id}>{link.link_value}</code>)}
@@ -494,15 +513,37 @@ function ProjectIntelligencePage({ project, notify }: { project: Project | null;
           {selectedId === record.id && (detail.data && detail.data.id === record.id
             ? <div className="intel-detail">
                 <p className="section-label">EVIDENCE ({detail.data.evidence.length})</p>
-                <ul className="intel-evidence-list">{detail.data.evidence.map(item => <li key={item.id}><code>{item.kind.toLowerCase()}{item.file ? ` · ${item.file}${item.line ? `:${item.line}` : ''}` : ''}</code><span>{item.description}</span></li>)}</ul>
+                <ul className="intel-evidence-list">{detail.data.evidence.map(item => <li key={item.id}><code>{item.file ? `${item.file}${item.line ? `:${item.line}` : ''}` : item.kind.toLowerCase()}</code><div><strong>{item.description || item.kind.toLowerCase().replaceAll('_', ' ')}</strong>{item.symbol && <p>Symbol: <code>{item.symbol}</code></p>}{item.file_hash && <p>Source hash: <code>{item.file_hash}</code> · {item.source_hash_matches === true ? 'matches indexed source' : item.source_hash_matches === false ? 'stale against indexed source' : 'match not available'}</p>}{item.canonical_excerpt && <pre>{item.canonical_excerpt}</pre>}</div></li>)}</ul>
                 <p className="section-label">OBSERVATION HISTORY ({detail.data.observations.length})</p>
                 <ul className="observation-list">{detail.data.observations.map(observation => <li key={observation.id}><code>{observation.created_at.slice(0, 19).replace('T', ' ')}</code><span><strong>{observation.kind.toLowerCase().replaceAll('_', ' ')}</strong>{observation.from_state && observation.to_state ? ` · ${STATE_LABELS[observation.from_state] ?? observation.from_state} → ${STATE_LABELS[observation.to_state] ?? observation.to_state}` : ''}{observation.detail ? ` · ${observation.detail}` : ''}</span></li>)}</ul>
-                {detail.data.conflicts.length > 0 && <><p className="section-label">CONFLICTS ({detail.data.conflicts.length})</p><ul className="observation-list">{detail.data.conflicts.map(conflict => <li key={conflict.id}><code>{conflict.resolution_state.toLowerCase()}</code><span>{conflict.detail}</span></li>)}</ul></>}
+                {detail.data.observations.some(item => item.finding_id || item.review_id) && <><p className="section-label">LINKED REVIEW EVIDENCE</p><ul className="observation-list">{detail.data.observations.filter(item => item.finding_id || item.review_id).map(item => <li key={item.id}><code>{item.created_at.slice(0, 10)}</code><span>{item.finding_id && <>Finding <code>{item.finding_id}</code> </>}{item.review_id && <>Review <code>{item.review_id}</code></>}</span></li>)}</ul></>}
+                {detail.data.conflicts.length > 0 && <><p className="section-label">CONFLICTS ({detail.data.conflicts.length})</p><ul className="observation-list">{detail.data.conflicts.map(conflict => <li key={conflict.id}><code>{conflict.resolution_state.toLowerCase()}</code><span>{conflict.detail || JSON.stringify(conflict.evidence)}</span></li>)}</ul></>}
+                {selectedDocument && <section className="brain-document"><p className="section-label">MARKDOWN VAULT DOCUMENT</p><p><code>{selectedDocument.relative_path}</code> · {selectedDocument.sync_status} · {selectedDocument.source_status}</p>{documentDetail.loading ? <Loading /> : documentDetail.error ? <ErrorState error={documentDetail.error} retry={documentDetail.run} /> : documentDetail.data && <><p>Document hash <code>{documentDetail.data.content_hash}</code></p><pre>{documentDetail.data.body}</pre></>}</section>}
                 {record.superseded_by && <p className="field-hint">Superseded by {record.superseded_by}.</p>}
               </div>
             : <Loading />)}
-        </article>)}
-      </div>)}</div>}
+        </article>)}</div>}
+    <section className="brain-audit-panel" aria-labelledby="retrieval-inspector-title">
+      <div className="section-head"><div><p className="brain-kicker">LIVE RETRIEVAL / NO MODEL CALL</p><h2 id="retrieval-inspector-title">Retrieval inspector</h2><p>Run the same hybrid retrieval against this project’s indexed Markdown. Lifecycle exclusions remain visible here.</p></div></div>
+      <form className="brain-query" onSubmit={event => { event.preventDefault(); void inspect() }}>
+        <label>Query<input value={query} onChange={event => setQuery(event.target.value)} placeholder="task ownership of measurement_state" /></label>
+        <label>Symbols, comma separated<input value={querySymbols} onChange={event => setQuerySymbols(event.target.value)} placeholder="measurement_task, publish_snapshot" /></label>
+        <label>Files, comma separated<input value={queryFiles} onChange={event => setQueryFiles(event.target.value)} placeholder="src/measurement.cpp" /></label>
+        <label>Component<input value={queryComponent} onChange={event => setQueryComponent(event.target.value)} placeholder="measurement" /></label>
+        <button className="primary" disabled={inspecting || (!query.trim() && !querySymbols.trim() && !queryFiles.trim() && !queryComponent.trim())}>{inspecting ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}{inspecting ? 'Inspecting…' : 'Inspect retrieval'}</button>
+      </form>
+      {inspectorError && <ErrorState error={inspectorError} retry={() => void inspect()} />}
+      {retrieval && <div className="brain-results"><div className="brain-result-summary">{retrieval.matches.length} matches · FTS {retrieval.used_fts ? 'used' : 'not used'} · semantic {retrieval.used_semantic ? 'used' : 'not used'}</div>{retrieval.warnings.map(warning => <p className="field-hint" key={warning}>{warning}</p>)}{retrieval.matches.length ? retrieval.matches.map(match => <article key={`${match.document_id}:${match.chunk_id ?? match.intelligence_id}`} className={`brain-result ${match.included ? '' : 'excluded'}`}><div><strong>Chunk excerpt</strong><span className="brain-score">{match.score.toFixed(3)} · {Math.round(match.confidence * 100)}%</span></div><pre>{match.statement}</pre><p><StateBadge state={match.state} /> {match.lifecycle_warning || match.exclusion_reason || (match.included ? 'Included in normal context' : 'Excluded from normal context')}</p><div className="brain-signals">{match.match_signals.map(signal => <code key={signal}>{signal}</code>)}</div><p><code>{match.relative_path || match.document_id}</code>{match.heading_path && <> / {match.heading_path}</>}{match.chunk_id && <> · chunk <code>{match.chunk_id}</code></>}</p></article>) : <p className="field-hint">No indexed chunks matched this query and filter set.</p>}</div>}
+    </section>
+    <section className="brain-audit-panel" aria-labelledby="relationship-title">
+      <div className="section-head"><div><p className="brain-kicker">PERSISTED LINKS / BOUNDED TO 100 NODES</p><h2 id="relationship-title">Relationship explorer</h2><p>Only stored knowledge, symbol, file, finding, review, and Markdown document relationships are shown.</p></div></div>
+      <label className="brain-graph-filter">Filter nodes<input value={graphFilter} onChange={event => setGraphFilter(event.target.value)} placeholder="symbol, file, finding, review…" /></label>
+      {graph.loading ? <Loading /> : graph.error ? <ErrorState error={graph.error} retry={graph.run} /> : visibleGraphNodes.length ? <div className="brain-graph"><ul>{visibleGraphNodes.map(node => <li key={node.id}><span>{node.kind}</span><strong>{node.label}</strong>{node.path && <code>{node.path}</code>}</li>)}</ul><div className="brain-graph-edges"><p>{visibleGraphEdges.length} persisted relationships{graph.data?.truncated ? ' · graph capped at 100 nodes' : ''}</p>{visibleGraphEdges.map((edge, index) => { const source = visibleGraphNodes.find(node => node.id === edge.source); const target = visibleGraphNodes.find(node => node.id === edge.target); return <p key={`${edge.source}:${edge.relation}:${edge.target}:${index}`}><code>{source?.label}</code> {edge.relation.replaceAll('_', ' ').toLowerCase()} <code>{target?.label}</code></p> })}</div></div> : <p className="field-hint">No persisted relationships match this filter.</p>}
+    </section>
+    <section className="brain-audit-panel" aria-labelledby="trace-title">
+      <div className="section-head"><div><p className="brain-kicker">CONTEXT BUILDER RECORDS</p><h2 id="trace-title">Retrieval traces</h2><p>Stored retrieval metadata for review and learning roles. These records exclude hidden reasoning and raw prompts.</p></div></div>
+      {traces.loading ? <Loading /> : traces.error ? <ErrorState error={traces.error} retry={traces.run} /> : traces.data && traces.data.traces.length ? <div className="brain-trace-layout"><nav className="brain-trace-list" aria-label="Retrieval traces">{traces.data.traces.map(trace => <button key={trace.id} className={selectedTraceId === trace.id ? 'active' : ''} onClick={() => setSelectedTraceId(trace.id)}><strong>{trace.role.replaceAll('_', ' ')}</strong><span>{formatWhen(trace.created_at)}</span><small>{trace.results.length} matches · {trace.review_id || trace.finding_id || trace.memory_id || 'project context'}</small></button>)}</nav>{traceDetail.data && <article className="brain-trace-detail"><p><strong>{traceDetail.data.role}</strong> · {formatWhen(traceDetail.data.created_at)}</p><p>Snapshot <code>{traceDetail.data.source_snapshot_hash}</code></p><p>Prompt version <code>{traceDetail.data.prompt_version}</code></p><p>Query: {traceDetail.data.query || '(metadata only)'}</p><p>Filters: <code>{JSON.stringify(traceDetail.data.metadata_filters)}</code></p><p>Selected chunks: {traceDetail.data.selected_chunk_ids.map(id => <code key={id}>{id}</code>)}</p>{traceDetail.data.results.map(match => <article className="brain-result" key={`${match.chunk_id}:${match.document_id}`}><p><StateBadge state={match.lifecycle_state} /> {match.included ? 'included' : `excluded: ${match.exclusion_reason}`}</p><p>{match.score.toFixed(3)} · {match.match_signals.join(' · ')}</p><p><code>{match.relative_path || match.document_id}</code>{match.heading_path && <> / {match.heading_path}</>}</p><pre>{match.excerpt}</pre></article>)}</article>}</div> : <p className="field-hint">No retrieval traces have been recorded for this project yet.</p>}
+    </section>
     <section className="panel suggest-panel">
       <div className="section-head"><div><h2>Suggest knowledge</h2><p>Engineer-authored knowledge uses the same lifecycle: it is stored as reinforced engineer knowledge and still requires source revalidation before it is called verified.</p></div><span className="source-tag">ENGINEER-AUTHORED</span></div>
       <div className="suggest-form">
@@ -624,7 +665,7 @@ function SettingsPage() {
         </div>
         <label>Provider identifier<input value={provider} onChange={event => setProvider(event.target.value)} placeholder="openrouter, 9router, or openai-compatible" /></label>
         <label>Chat completions endpoint<input value={endpoint} onChange={event => setEndpoint(event.target.value)} placeholder="https://…/v1/chat/completions" /></label>
-        <div className="model-grid">{Object.keys(models).map(role => <label key={role}>{role.replaceAll('_', ' ')}<input value={models[role] ?? ''} onChange={event => setModels(current => ({ ...current, [role]: event.target.value }))} placeholder="provider/model" /></label>)}</div>
+        <div className="model-grid">{Object.keys(models).filter(role => role !== 'chat').map(role => <label key={role}>{role.replaceAll('_', ' ')}<input value={models[role] ?? ''} onChange={event => setModels(current => ({ ...current, [role]: event.target.value }))} placeholder="provider/model" /></label>)}</div>
         <label>Review context per AI request<select value={reviewContextChars} onChange={event => setReviewContextChars(Number(event.target.value))}>{REVIEW_CONTEXT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select><span className="field-hint">{REVIEW_CONTEXT_OPTIONS.find(option => option.value === reviewContextChars)?.detail} Smaller requests can reduce gateway timeouts, but create more batches. Every reviewable file remains covered.</span></label>
         <div className="settings-two-column">
           <label>Structured response mode<select value={structuredOutputMode} onChange={event => setStructuredOutputMode(event.target.value as typeof structuredOutputMode)}><option value="PROMPT_ONLY">Prompt only — widest compatibility</option><option value="JSON_OBJECT">JSON object — provider enforced</option><option value="JSON_SCHEMA">JSON schema — strictest validation</option></select><span className="field-hint">Use provider-enforced modes only when your gateway documents support for <code>response_format</code>. Prompt-only remains the safest default.</span></label>

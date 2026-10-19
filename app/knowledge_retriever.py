@@ -26,6 +26,14 @@ class KnowledgeRetriever:
             locale = "en"
         return _msg(key, locale, **params)
 
+    @staticmethod
+    def _redact_excerpt(value: str) -> str:
+        return re.sub(
+            r"(?i)(?:sk-[A-Za-z0-9_-]{16,}|(?:ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]{12,}|Bearer\s+[^\s,;]+|(?:api[\s_-]?key|access[\s_-]?token|password|token|secret|authorization)\s*[:=]\s*[^\s,;]+)",
+            "[REDACTED]",
+            value[:1200],
+        )
+
     def _state(self, chunk: dict[str, Any], record_cache: dict[str, dict[str, Any] | None] | None = None) -> str:
         """Use current DB lifecycle state when the chunk has a memory owner."""
         memory_id = chunk.get("intelligence_id")
@@ -86,7 +94,7 @@ class KnowledgeRetriever:
                     topology_files.add(str(item["file"]).casefold())
         return selected, topology_names, topology_files, allocation_ids, allocation_names
 
-    def search(self, request: RetrievalQuery) -> RetrievalResult:
+    def search(self, request: RetrievalQuery, *, include_excluded: bool = False) -> RetrievalResult:
         all_chunks = self.repository.list_knowledge_chunks(request.project_id)
         documents = {item["id"]: item for item in self.repository.list_knowledge_documents(request.project_id)}
         requested_symbols = {value.casefold() for value in request.symbols}
@@ -98,7 +106,9 @@ class KnowledgeRetriever:
         links_cache: dict[str, list[dict[str, Any]]] = {}
 
         def add(chunk: dict[str, Any], signal: str) -> None:
-            if chunk.get("project_id") != request.project_id or not self._allowed(chunk, record_cache):
+            if chunk.get("project_id") != request.project_id:
+                return
+            if not include_excluded and not self._allowed(chunk, record_cache):
                 return
             entry = candidates.setdefault(chunk["id"], {"chunk": chunk, "signals": set()})
             entry["signals"].add(signal)
@@ -152,7 +162,7 @@ class KnowledgeRetriever:
         # Lexical fallback remains deterministic and is also useful for FTS
         # results that contain only a partial token match.
         for chunk in all_chunks:
-            if not self._allowed(chunk, record_cache):
+            if not include_excluded and not self._allowed(chunk, record_cache):
                 continue
             body = str(chunk.get("body") or "").casefold()
             if query_terms and any(term in body for term in query_terms):
@@ -164,6 +174,12 @@ class KnowledgeRetriever:
             chunk = entry["chunk"]
             metadata = chunk.get("metadata") or {}
             state = self._state(chunk, record_cache)
+            included = self._allowed(chunk, record_cache)
+            exclusion_reason = {
+                "CONFLICTED": "Conflicted knowledge is excluded from normal context.",
+                "SUPERSEDED": "Superseded knowledge is historical and excluded from normal context.",
+                "DISABLED": "Disabled knowledge is excluded from normal context.",
+            }.get(state) if not included else None
             signals = sorted(entry["signals"])
             score = sum({
                 "exact-symbol": 10.0, "exact-file": 8.0, "topology": 6.0,
@@ -204,6 +220,14 @@ class KnowledgeRetriever:
                 lifecycle_warning=self._t("retrieval.revalidation_lifecycle") if state == "NEEDS_REVALIDATION" else None,
                 related_ids=[link["target_id"] for link in links if link.get("validation_status") == "VALID" and link.get("target_id")],
                 relative_path=document.get("relative_path"),
+                included=included,
+                exclusion_reason=exclusion_reason,
             ))
         matches.sort(key=lambda item: (-item.score, item.intelligence_id, item.chunk_id or ""))
         return RetrievalResult(matches=matches[:request.cap], used_semantic=False, used_fts=fts_used, warnings=list(dict.fromkeys(warnings))[:12])
+
+    def inspect(self, request: RetrievalQuery) -> RetrievalResult:
+        """Return matching eligible and lifecycle-excluded chunks for audit UI."""
+        result = self.search(request, include_excluded=True)
+        matches = [match.model_copy(update={"statement": self._redact_excerpt(match.statement)}) for match in result.matches]
+        return result.model_copy(update={"matches": matches})

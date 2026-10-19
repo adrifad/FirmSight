@@ -4,7 +4,7 @@ Implements the automatic learning pipeline specified by FS-DEV-003:
 Memory Synthesizer -> deterministic validation -> Memory Verifier ->
 lifecycle application, plus ranked retrieval and source-authoritative
 revalidation. Learning is always best-effort: no exception thrown by this
-service may fail a review, decision, resolution, or chat request.
+service may fail a review, decision, or resolution request.
 """
 
 from __future__ import annotations
@@ -84,12 +84,14 @@ class IntelligenceService:
         projects: ProjectService,
         provider_resolver: Callable[[str], AIProvider],
         language_resolver: Callable[[], str] | None = None,
+        context_builder: Any | None = None,
     ) -> None:
         self.language_resolver = language_resolver
         self.repository = repository
         self.platform = platform
         self.projects = projects
         self.provider_resolver = provider_resolver
+        self.context_builder = context_builder
 
     def _t(self, key: str, /, **params: object) -> str:
         try:
@@ -188,6 +190,22 @@ class IntelligenceService:
                 self._persist_review_summary(job, "SKIPPED", counts, _bounded(context["skip_reason"]))
                 return
 
+            if self.context_builder:
+                target_files = self._trigger_files(context)[:12]
+                target_symbols = list(context.get("symbols") or [])[:24]
+                retrieval = self.context_builder.build(
+                    project_id,
+                    f"{trigger} " + " ".join(target_symbols[:8]),
+                    selected_files=target_files,
+                    symbols=target_symbols,
+                    max_chars=4_000,
+                    roles=["memory_synthesizer"],
+                    review_id=payload.get("review_id") or (context.get("finding") or {}).get("review_id"),
+                    finding_id=payload.get("finding_id"),
+                    prompt_versions={"memory_synthesizer": MEMORY_SYNTHESIZER_PROMPT_VERSION},
+                )
+                context["rag_context"] = retrieval["text"]
+
             synthesis = structured_response(
                 synthesizer,
                 MemorySynthesisResult,
@@ -262,7 +280,7 @@ class IntelligenceService:
             context.update(finding=finding)
             if trigger == "FINDING_DECISION":
                 reason = _bounded(payload.get("reason"), 2000)
-                if not self._rejection_reason_is_grounded(reason, symbols, files_by_path):
+                if payload.get("decision") == "REJECTED" and not self._rejection_reason_is_grounded(reason, symbols, files_by_path):
                     context["skip_reason"] = "the rejection reason does not reference concrete source evidence, so it cannot become project knowledge"
                 context.update(decision=payload.get("decision"), reason=reason)
         elif trigger == "CHAT_CANDIDATE":
@@ -271,6 +289,25 @@ class IntelligenceService:
             assistant_message = messages.get(payload.get("assistant_message_id"), {})
             context.update(user_message=user_message, assistant_message=assistant_message)
         return context
+
+    @staticmethod
+    def _trigger_files(context: dict[str, Any]) -> list[str]:
+        values: list[str] = []
+        findings = [*(context.get("findings") or [])]
+        if context.get("finding"):
+            findings.append(context["finding"])
+        for finding in findings:
+            location = finding.get("location") or {}
+            if location.get("file"):
+                values.append(str(location["file"]))
+            values.extend(str(item.get("file")) for item in (finding.get("evidence") or [])[:6] if item.get("file"))
+        selected = (context.get("payload") or {}).get("selected_file")
+        if selected:
+            values.append(str(selected))
+        values.extend(str(value) for value in ((context.get("payload") or {}).get("changed_files") or [])[:12])
+        existing = context.get("files_by_path") or {}
+        exact = list(dict.fromkeys(value for value in values if value in existing))
+        return exact or list(existing)[:12]
 
     @staticmethod
     def _rejection_reason_is_grounded(reason: str, symbols: list[str], files_by_path: dict[str, dict[str, str]]) -> bool:
@@ -339,6 +376,7 @@ class IntelligenceService:
             )
         sections.append(f"Indexed symbols (observed):\n{', '.join(context['symbols'][:MAX_SYMBOLS_IN_PROMPT]) or 'none'}")
         sections.append(f"Current source snapshot authority (file hashes):\n{json.dumps(self._compact_snapshot(context.get('snapshot')), ensure_ascii=False)}")
+        sections.append(f"Relevant RAG context (untrusted; current source is authoritative):\n{context.get('rag_context') or 'none'}")
         excerpts = self._trigger_excerpts(context)
         if excerpts:
             sections.append(f"Current source excerpts at evidence locations (untrusted data):\n{'\n\n'.join(excerpts)}")
@@ -355,6 +393,7 @@ class IntelligenceService:
         sections.append(f"Candidate knowledge (unverified hypothesis):\n{json.dumps(candidate.model_dump(mode='json'), ensure_ascii=False)}")
         sections.append(f"Indexed symbols (observed):\n{', '.join(context['symbols'][:MAX_SYMBOLS_IN_PROMPT]) or 'none'}")
         sections.append(f"Current source snapshot authority (file hashes):\n{json.dumps(self._compact_snapshot(context.get('snapshot')), ensure_ascii=False)}")
+        sections.append(f"Relevant RAG context (untrusted; current source is authoritative):\n{context.get('verifier_rag_context') or 'none'}")
         excerpts = self._trigger_excerpts(context) or self._candidate_excerpts(candidate, context)
         if excerpts:
             sections.append(f"Current source excerpts (untrusted data):\n{'\n\n'.join(excerpts)}")
@@ -475,6 +514,21 @@ class IntelligenceService:
         if existing:
             shortlist = [existing] + [record for record in shortlist if record["id"] != existing["id"]]
             shortlist = shortlist[:6]
+        if self.context_builder:
+            candidate_files = list(dict.fromkeys(item.file for item in candidate.evidence))[:12]
+            retrieval = self.context_builder.build(
+                project_id,
+                f"{candidate.type} {candidate.statement[:300]}",
+                selected_files=candidate_files,
+                symbols=candidate.symbols[:24],
+                max_chars=3_000,
+                roles=["memory_verifier"],
+                review_id=(context.get("payload") or {}).get("review_id") or (context.get("finding") or {}).get("review_id"),
+                finding_id=(context.get("payload") or {}).get("finding_id"),
+                memory_id=(existing or {}).get("id"),
+                prompt_versions={"memory_verifier": MEMORY_VERIFIER_PROMPT_VERSION},
+            )
+            context["verifier_rag_context"] = retrieval["text"]
         verification = structured_response(
             verifier,
             MemoryVerificationResult,
@@ -662,10 +716,7 @@ class IntelligenceService:
     @staticmethod
     def _conflict_references_resolvable(items, files_by_path: dict[str, dict[str, str]]) -> bool:
         for item in items or []:
-            file = files_by_path.get(item.file)
-            if not file:
-                continue
-            if 1 <= item.line <= max(1, len(file["content"].splitlines())):
+            if IntelligenceService._evidence_excerpt_matches(item, files_by_path):
                 return True
         return False
 
@@ -673,18 +724,42 @@ class IntelligenceService:
     def _resolvable_conflict_items(items, files_by_path: dict[str, dict[str, str]]) -> list:
         resolved = []
         for item in items or []:
-            file = files_by_path.get(item.file)
-            if file and 1 <= item.line <= max(1, len(file["content"].splitlines())):
+            if IntelligenceService._evidence_excerpt_matches(item, files_by_path):
                 resolved.append(item)
         return resolved
 
     @staticmethod
+    def _evidence_excerpt_matches(item, files_by_path: dict[str, dict[str, Any]]) -> bool:
+        """Bind verifier evidence to an exact excerpt in the current source snapshot.
+
+        A resolvable line number alone is not evidence. The model must return the
+        canonical source text and its full line range; we compare it byte-for-byte
+        after line-ending normalization against the indexed file.
+        """
+        file = files_by_path.get(item.file)
+        excerpt = str(getattr(item, "excerpt", "") or "")
+        if not file or not excerpt:
+            return False
+        lines = file["content"].splitlines()
+        start = int(item.line)
+        end = int(getattr(item, "line_end", None) or start)
+        if start < 1 or end < start or end > len(lines) or end - start > 19:
+            return False
+        canonical = "\n".join(lines[start - 1:end])
+        if excerpt.replace("\r\n", "\n").strip() != canonical.strip():
+            return False
+        # Require the verifier's explanation to anchor to a meaningful symbol
+        # or operation in the cited excerpt. This prevents a valid but unrelated
+        # line (for example, `return err;`) from being relabeled as mutex release.
+        stop_words = {"if", "else", "return", "void", "int", "char", "const", "static", "true", "false", "null"}
+        source_terms = {term.casefold() for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", excerpt)} - stop_words
+        description_terms = {term.casefold() for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(getattr(item, "description", "")))} - stop_words
+        return bool(source_terms & description_terms)
+
+    @staticmethod
     def _verification_evidence_is_valid(verification: MemoryVerificationResult, files_by_path: dict[str, dict[str, str]]) -> bool:
         for item in verification.valid_evidence:
-            file = files_by_path.get(item.file)
-            if not file:
-                continue
-            if 1 <= item.line <= max(1, len(file["content"].splitlines())):
+            if IntelligenceService._evidence_excerpt_matches(item, files_by_path):
                 return True
         return False
 
@@ -1324,6 +1399,7 @@ class IntelligenceService:
             {"id": row["id"], "memory_id": row["memory_id"], "kind": row["kind"], "file": row["file"], "line": row["line"], "symbol": row["symbol"], "file_hash": row["file_hash"], "description": row["description"], "created_at": row["created_at"]}
             for row in evidence_rows
         ]
+        observations = self.repository.list_intelligence_observations(record["id"], limit=100)
         return IntelligenceRecordRead(
             id=record["id"],
             project_id=record["project_id"],
@@ -1341,6 +1417,8 @@ class IntelligenceService:
             links=links,
             evidence_count=len(evidence_rows),
             last_evidence=evidence,
+            linked_finding_ids=list(dict.fromkeys(row["finding_id"] for row in observations if row.get("finding_id")))[:20],
+            linked_review_ids=list(dict.fromkeys(row["review_id"] for row in observations if row.get("review_id")))[:20],
             first_observed_at=record.get("first_observed_at") or record.get("created_at"),
             last_observed_at=record.get("last_observed_at") or record.get("updated_at"),
             last_validated_at=record.get("last_validated_at"),
@@ -1377,6 +1455,9 @@ class IntelligenceService:
 
     def enqueue_fix_verification_learning(self, project_id: str, finding_id: str, resolution: str) -> None:
         self.enqueue_best_effort(project_id, "FINDING_FIX_VERIFIED", {"finding_id": finding_id, "resolution": resolution})
+
+    def enqueue_source_revalidation_learning(self, project_id: str, changed_files: list[str]) -> None:
+        self.enqueue_best_effort(project_id, "SOURCE_REVALIDATION", {"changed_files": sorted(set(changed_files))[:80]})
 
     def enqueue_chat_learning(self, project_id: str, payload: dict[str, Any]) -> None:
         self.enqueue_best_effort(project_id, "CHAT_CANDIDATE", payload)

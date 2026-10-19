@@ -1,6 +1,6 @@
-import { BrainCircuit, Code2, FileCode2, FolderKanban, LayoutDashboard, LayoutGrid, MessageSquareCode, Network, ScanSearch, Settings2, TriangleAlert, type LucideIcon } from 'lucide-react'
+import { BrainCircuit, Code2, FileCode2, FolderKanban, LayoutDashboard, LayoutGrid, Network, ScanSearch, Settings2, TriangleAlert, type LucideIcon } from 'lucide-react'
 
-export type Page = 'dashboard' | 'projects' | 'overview' | 'code' | 'review' | 'findings' | 'chat' | 'architecture' | 'memory' | 'yaml' | 'settings'
+export type Page = 'dashboard' | 'projects' | 'overview' | 'code' | 'review' | 'findings' | 'architecture' | 'rag-brain' | 'yaml' | 'settings'
 
 export interface NavRoute {
   id: Page
@@ -21,9 +21,8 @@ export const projectNav: NavRoute[] = [
   { id: 'code', label: 'Code', icon: Code2 },
   { id: 'review', label: 'AI Review', icon: ScanSearch },
   { id: 'findings', label: 'Findings', icon: TriangleAlert },
-  { id: 'chat', label: 'AI Chat', icon: MessageSquareCode },
   { id: 'architecture', label: 'Architecture', icon: Network },
-  { id: 'memory', label: 'Project Intelligence', icon: BrainCircuit },
+  { id: 'rag-brain', label: 'RAG Brain', icon: BrainCircuit },
   { id: 'yaml', label: 'YAML', icon: FileCode2 },
 ]
 

@@ -209,7 +209,8 @@ def test_prompt_versions_bumped_for_language_block():
     assert versions["VERIFIER_PROMPT_VERSION"] == "v4-flow-first"
     assert versions["FIX_VERIFIER_PROMPT_VERSION"] == "v6"
     for name in ("YAML_GENERATOR_PROMPT_VERSION", "MEMORY_SYNTHESIZER_PROMPT_VERSION", "MEMORY_VERIFIER_PROMPT_VERSION", "CHAT_PROMPT_VERSION"):
-        assert versions.get(name, getattr(prompts, name)) == "v2", name
+        expected = "v3" if name == "MEMORY_VERIFIER_PROMPT_VERSION" else "v2"
+        assert versions.get(name, getattr(prompts, name)) == expected, name
     assert prompts.LANGUAGE_INSTRUCTION_VERSION == "v1"
 
 
@@ -219,8 +220,6 @@ def test_chat_and_role_prompts_receive_language_block_through_services(tmp_path)
     import app.main as main_module
 
     captured: dict[str, str] = {}
-    mode = {"phase": "chat"}
-
     class CapturingProvider:
         name = "capturing"
         role = "chat"
@@ -231,9 +230,6 @@ def test_chat_and_role_prompts_receive_language_block_through_services(tmp_path)
             return True
 
         def chat(self, system_prompt: str, _user_prompt: str) -> str:
-            if mode["phase"] == "chat":
-                captured["chat_system"] = system_prompt
-                return "Structured analysis of the supplied source."
             captured["structured_systems"] = system_prompt
             if "Investigator" in system_prompt:
                 return INVESTIGATOR_RESULT
@@ -258,13 +254,11 @@ def test_chat_and_role_prompts_receive_language_block_through_services(tmp_path)
     project_id = project.json()["id"]
     assert client.post(f"/api/projects/{project_id}/files", json={"files": {"main.c": "void loop(void) {}\n"}}).status_code == 200
 
-    # Chat path must append the Indonesian block.
-    chat = client.post(f"/api/projects/{project_id}/chat", json={"message": "Explain the OTA path"})
-    assert chat.status_code == 200, chat.text
-    assert "LANGUAGE INSTRUCTION (Bahasa Indonesia)" in captured["chat_system"]
+    # The former user-facing Chat endpoints are removed.
+    assert client.get(f"/api/projects/{project_id}/chat").status_code == 404
+    assert client.post(f"/api/projects/{project_id}/chat", json={"message": "Explain the OTA path"}).status_code == 404
 
     # Review path: investigator system prompt must contain the block.
-    mode["phase"] = "review"
     review = client.post(f"/api/projects/{project_id}/reviews", json={"scope": "FULL_PROJECT", "focus": []})
     assert review.status_code == 201, review.text
 
@@ -279,15 +273,6 @@ def test_chat_and_role_prompts_receive_language_block_through_services(tmp_path)
             break
         time.sleep(0.1)
     assert "LANGUAGE INSTRUCTION (Bahasa Indonesia)" in captured["structured_systems"]
-
-    # English mode must leave the chat system prompt without the block.
-    mode["phase"] = "chat"
-    body["language"] = "en"
-    assert client.put("/api/settings", json=body).status_code == 200
-    chat_en = client.post(f"/api/projects/{project_id}/chat", json={"message": "Explain again"})
-    assert chat_en.status_code == 200
-    assert "LANGUAGE INSTRUCTION" not in captured["chat_system"]
-    assert captured["chat_system"].startswith("You are FirmSight's project-aware firmware assistant.")
 
 
 def test_frontend_has_language_selector_and_localization_module():

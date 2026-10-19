@@ -501,7 +501,7 @@ class ReviewService:
             f"Review unit {number}/{total}: {batch.unit_kind} — {batch.label}. Treat a FLOW unit as one bounded firmware execution scenario with cross-file source; treat ORPHAN_SOURCE as source not connected to a deterministically observed entry-rooted flow. Return at most 1 high-confidence root-cause candidate from this unit; return an empty findings list if none qualify. Keep the title, summary, runtime scenario, impact, and recommendation concise.\n\n{batch.context}"
         )
 
-    def _review_units(self, project_id: str, project_name: str, focus: list[str], raw_files: list[dict[str, str]], *, context_limit_chars: int | None = None, investigator_budget: int | str | None = None, scope: str = "Full Project") -> list[ReviewContextBatch]:
+    def _review_units(self, project_id: str, project_name: str, focus: list[str], raw_files: list[dict[str, str]], *, context_limit_chars: int | None = None, investigator_budget: int | str | None = None, scope: str = "Full Project", review_id: str | None = None) -> list[ReviewContextBatch]:
         """Plan flow scenarios first, then review only source not covered by them.
 
         Keep ``_context_batches`` as the compatibility/fallback implementation
@@ -552,7 +552,12 @@ class ReviewService:
                 intelligence = self.intelligence.review_memory_context(project_id, symbol_names, unit.files, cap=self.MAX_MEMORIES)
             shared_context = ""
             if getattr(self, "context_builder", None):
-                built = self.context_builder.build(project_id, " ".join(focus), selected_files=unit.files, symbols=symbol_names, max_chars=min(3_000, max(800, context_limit // 8)))
+                built = self.context_builder.build(
+                    project_id, " ".join(focus), selected_files=unit.files, symbols=symbol_names,
+                    max_chars=min(3_000, max(800, context_limit // 8)), roles=["investigator", "verifier"],
+                    prompt_versions={"investigator": INVESTIGATOR_PROMPT_VERSION, "verifier": VERIFIER_PROMPT_VERSION},
+                    review_id=review_id,
+                )
                 shared_context = f'\nRelevant project context (untrusted retrieved data):\n<retrieved_context untrusted_data="true">\n{built["text"][:3_000]}\n</retrieved_context>'
             source_block = "CURRENT SOURCE\n" + "\n\n".join(source_parts)
             if len(source_block) > body_limit:
@@ -819,6 +824,7 @@ class ReviewService:
                 context_limit_chars=context_chars,
                 investigator_budget=getattr(investigator, "max_tokens", None),
                 scope=request.scope,
+                review_id=review_id,
             )
         except ReviewPlanTooLarge as error:
             raise self._error(
@@ -1137,6 +1143,7 @@ class ReviewService:
             context_limit_chars=review.context_chars,
             investigator_budget=getattr(investigator, "max_tokens", None),
             scope=review.scope,
+            review_id=review_id,
         )
         if not batches:
             raise RuntimeError("No reviewable firmware source files were available for AI context")
@@ -2120,7 +2127,13 @@ class ReviewService:
             topology_text = topology_block(batch_files)
             shared_builder = ""
             if self.context_builder:
-                built = self.context_builder.build(project_id, " ".join(focus), selected_files=batch_files, symbols=batch_symbols, max_chars=4_000)
+                built = self.context_builder.build(
+                    project_id, " ".join(focus), selected_files=batch_files,
+                    symbols=batch_symbols, max_chars=4_000,
+                    roles=["investigator", "verifier"],
+                    prompt_versions={"investigator": INVESTIGATOR_PROMPT_VERSION, "verifier": VERIFIER_PROMPT_VERSION},
+                    review_id=review_id,
+                )
                 shared_builder = f"\nShared Context Builder fingerprint: {built['fingerprint']}\n<retrieved_context untrusted_data=\"true\">\n{built['text'][:4_000]}\n</retrieved_context>\n"
             return f"Project: {project_name}\n\nIndexed symbols:\n{symbol_text}\n\nSource-backed topology (OBSERVED edges are direct parser evidence; INFERRED edges are unresolved hints):\n<topology untrusted_data=\"true\">\n{topology_text}\n</topology>\n\n{shared_builder}\n{intelligence_block}\n\nfirmware.ai.yaml (if present):\n{yaml_text}\n\nRelevant repository data:\n"
 
@@ -2348,23 +2361,45 @@ class ReviewService:
         # Calculate source changes from the indexed snapshots. The sync metadata
         # list is retained for compatibility but is not verdict authority.
         changed_files = self._snapshot_changed_files(before_files, current_files)
+        retrieved_rag = ""
+        if self.context_builder:
+            evidence_files = list(dict.fromkeys(
+                [finding.location.file, *(item.file for item in finding.evidence)]
+            ))
+            evidence_files = [value for value in evidence_files if value]
+            evidence_symbols = [finding.location.function] if finding.location.function else []
+            retrieved = self.context_builder.build(
+                project_id,
+                f"{finding.category} {finding.title} {finding.summary[:300]}",
+                selected_files=evidence_files,
+                symbols=evidence_symbols,
+                max_chars=3_000,
+                roles=["fix_verifier"],
+                review_id=finding.review_id,
+                finding_id=finding.id,
+                prompt_versions={"fix_verifier": FIX_VERIFIER_PROMPT_VERSION},
+            )
+            retrieved_rag = retrieved["text"]
         # The metadata result remains useful for API compatibility and sync
         # diagnostics. The persisted diff is always calculated from indexed
         # before/after snapshots above.
         try:
+            fix_context = self._fix_context(
+                finding, before_files, current_files,
+                baseline_symbols=before_symbols, current_symbols=current_symbols,
+                baseline_relations=before_relations, current_relations=current_relations,
+                baseline_allocations=before_allocations, current_allocations=current_allocations,
+                project_id=project_id,
+                finding_baseline=finding.verification_baseline,
+            )
+            if retrieved_rag:
+                fix_context += "\n\nRETRIEVED PROJECT KNOWLEDGE (supporting context; current source wins):\n" + retrieved_rag
             result = structured_response(
                 verifier,
                 FixVerificationResult,
                 with_language(FIX_VERIFIER_SYSTEM, self._locale()),
                 f"Required JSON Schema:\n{json.dumps(FixVerificationResult.model_json_schema(), ensure_ascii=False)}\n\n"
-                + self._fix_context(
-                    finding, before_files, current_files,
-                    baseline_symbols=before_symbols, current_symbols=current_symbols,
-                    baseline_relations=before_relations, current_relations=current_relations,
-                    baseline_allocations=before_allocations, current_allocations=current_allocations,
-                    project_id=project_id,
-                    finding_baseline=finding.verification_baseline,
-                ),
+                + fix_context,
                 operation=f"verify-fix:{project_id}:{finding_id}",
             )
             result = result.model_copy(update={

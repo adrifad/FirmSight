@@ -351,6 +351,8 @@ class RetrievalMatch(BaseModel):
     lifecycle_warning: str | None = None
     related_ids: list[str] = Field(default_factory=list, max_length=24)
     relative_path: str | None = None
+    included: bool = True
+    exclusion_reason: str | None = None
 
 
 class RetrievalResult(BaseModel):
@@ -368,3 +370,56 @@ class IntelligenceCorrectionRequest(BaseModel):
 class KnowledgeSearchResult(BaseModel):
     matches: list[RetrievalMatch]
     warnings: list[str] = Field(default_factory=list, max_length=12)
+
+
+class RetrievalTraceMatch(BaseModel):
+    chunk_id: str
+    document_id: str
+    intelligence_id: str | None = None
+    score: float
+    match_signals: list[str] = Field(default_factory=list, max_length=12)
+    lifecycle_state: str
+    included: bool
+    exclusion_reason: str | None = None
+    relative_path: str | None = None
+    heading_path: str | None = None
+    excerpt: str = Field(default="", max_length=1200)
+
+
+class RetrievalTraceRead(BaseModel):
+    id: str
+    project_id: str
+    role: str
+    review_id: str | None = None
+    finding_id: str | None = None
+    memory_id: str | None = None
+    source_snapshot_hash: str
+    query: str
+    metadata_filters: dict[str, Any] = Field(default_factory=dict)
+    selected_chunk_ids: list[str] = Field(default_factory=list, max_length=25)
+    results: list[RetrievalTraceMatch] = Field(default_factory=list, max_length=50)
+    prompt_version: str
+    created_at: datetime
+
+
+class RetrievalTraceList(BaseModel):
+    traces: list[RetrievalTraceRead] = Field(default_factory=list, max_length=100)
+
+
+class RelationshipNode(BaseModel):
+    id: str
+    kind: str
+    label: str
+    path: str | None = None
+
+
+class RelationshipEdge(BaseModel):
+    source: str
+    target: str
+    relation: str
+
+
+class RelationshipGraph(BaseModel):
+    nodes: list[RelationshipNode] = Field(default_factory=list, max_length=200)
+    edges: list[RelationshipEdge] = Field(default_factory=list, max_length=400)
+    truncated: bool = False

@@ -490,7 +490,7 @@ def _valid_verifier_json() -> str:
         "target_id": None,
         "confidence": 0.9,
         "source_support": "SUPPORTED",
-        "valid_evidence": [{"file": "src/main.c", "line": 6, "description": "Mutex take without release in current source."}],
+        "valid_evidence": [{"file": "src/main.c", "line": 4, "line_end": 7, "excerpt": "  xSemaphoreTake(ota_mutex, portMAX_DELAY);\n  esp_err_t err = esp_ota_begin(NULL, OTA_SIZE_UNKNOWN, NULL);\n  if (err != ESP_OK) {\n    return err;", "description": "xSemaphoreTake has no xSemaphoreGive before this error return."}],
         "conflict_target_id": None,
         "conflict_evidence": [],
         "rationale": "Current source confirms the missing release on the error path.",

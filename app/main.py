@@ -14,14 +14,14 @@ from .ai_provider import AIProvider
 from .environment import load_local_environment
 from .i18n import normalize_locale
 from .indexer import FirmwareIndexer
-from .interaction_service import ChatService, YamlService
+from .interaction_service import YamlService
 from .context_builder import ContextBuilder
 from .flow_service import FlowService
 from .knowledge_base_service import KnowledgeBaseService
 from .knowledge_index_service import KnowledgeIndexService
 from .knowledge_retriever import KnowledgeRetriever
 from .intelligence_schemas import IntelligenceCorrectionRequest, IntelligenceDetailRead, IntelligenceDisableRequest, IntelligenceListResponse, IntelligenceRecordRead, IntelligenceRevalidateResponse, IntelligenceSummaryResponse, ReviewLearningSummaryRead
-from .knowledge_schemas import KnowledgeDocumentDetailRead, KnowledgeDocumentRead, KnowledgeIndexReport, KnowledgeRetryOutcome, KnowledgeSearchResult, RetrievalQuery, VaultSettingsRead, VaultSettingsUpdate, VaultSyncReport, VaultSyncStateRead
+from .knowledge_schemas import KnowledgeDocumentDetailRead, KnowledgeDocumentRead, KnowledgeIndexReport, KnowledgeRetryOutcome, KnowledgeSearchResult, RetrievalQuery, RetrievalResult, RetrievalTraceList, RetrievalTraceRead, RelationshipGraph, RelationshipNode, RelationshipEdge, VaultSettingsRead, VaultSettingsUpdate, VaultSyncReport, VaultSyncStateRead
 from .intelligence_service import IntelligenceService
 from .repository import MemoryRepository
 from .platform_repository import PlatformRepository
@@ -31,7 +31,7 @@ from .schemas import (
     RevalidationResponse,
 )
 from .platform_schemas import (
-    ChatMessageRead, ChatRequest, ChatResponse, FindingDecisionUpdate, FindingFixVerificationRequest, FindingRead, FindingResolutionUpdate, IndexRead, ProjectSourceSyncRead,
+    FindingDecisionUpdate, FindingFixVerificationRequest, FindingRead, FindingResolutionUpdate, IndexRead, ProjectSourceSyncRead,
     AISettingsRead, AISettingsUpdate, ProjectCreate, ProjectDirectoryImport, ProjectFileContent, ProjectFileRead, ProjectFilesUpload, ProjectRead, ProjectSourceSyncRequest,
     ReviewCreate, ReviewRead, SymbolRead, TopologyPathRead, TopologyRead, TopologyRelationRead, TopologySymbolRead, AllocationEventRead, YamlGenerateRequest, YamlRead, YamlValidateRequest,
     FlowIndexRead, FlowScenarioRead, FlowNodeRead, FlowResourceRead, SharedStateRead,
@@ -101,7 +101,7 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
     flow_service = FlowService(platform_repository)
     context_builder = ContextBuilder(platform_repository, knowledge_retriever, projects.lifetime_service, flow_service)
     resolve_provider = provider_resolver or settings_service.provider
-    intelligence = IntelligenceService(memory_repository, platform_repository, projects, resolve_provider, language_resolver=lambda: settings_service.config().language)
+    intelligence = IntelligenceService(memory_repository, platform_repository, projects, resolve_provider, language_resolver=lambda: settings_service.config().language, context_builder=context_builder)
     reviews = ReviewService(
         platform_repository,
         projects,
@@ -116,7 +116,6 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         knowledge_index=knowledge_index,
         language_resolver=lambda: settings_service.config().language,
     )
-    chat = ChatService(platform_repository, projects, reviews, memory_service, lambda: resolve_provider("chat"), intelligence=intelligence, context_builder=context_builder, language_resolver=lambda: settings_service.config().language)
     yaml = YamlService(platform_repository, projects, resolve_provider, language_resolver=lambda: settings_service.config().language)
 
     # Live service handles for tests and diagnostics: they are the exact instances
@@ -131,6 +130,9 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         projects=projects,
         knowledge_base=knowledge_base,
         knowledge_index=knowledge_index,
+        knowledge_retriever=knowledge_retriever,
+        context_builder=context_builder,
+        intelligence=intelligence,
         reviews=reviews,
         flows=flow_service,
     )
@@ -138,16 +140,15 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
     def get_service() -> MemoryService:
         return memory_service
 
-    def queue_vault_projection(project_id: str, background_tasks: BackgroundTasks) -> None:
-        """Best-effort Markdown vault projection after durable learning events."""
-        background_tasks.add_task(_project_vault_projection, project_id)
+    def queue_learning_sync(project_id: str, background_tasks: BackgroundTasks) -> None:
+        """Complete learning, then project and incrementally index it."""
+        background_tasks.add_task(_complete_learning_and_sync, project_id)
 
-    def _project_vault_projection(project_id: str) -> None:
-        # REV-046: a background projection must share the *same* per-project
-        # workflow lock as the automatic/manual projection+index workflow, so its
-        # file/row writes cannot interleave with a concurrent same-project
-        # projection and be misread as an unimported external edit.
-        reviews.project_vault_only(project_id)
+    def _complete_learning_and_sync(project_id: str) -> None:
+        # Learning job idempotency lives in SQLite. Projection and indexing use
+        # ReviewService's per-project lock and one final durable sync-state write.
+        intelligence.drain_pending_jobs(project_id)
+        reviews.project_and_index_vault(project_id)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -202,7 +203,7 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         return projects.index(project_id)
 
     @app.post("/api/projects/{project_id}/sync-source", response_model=ProjectSourceSyncRead)
-    def sync_project_source(project_id: str, request: ProjectSourceSyncRequest = ProjectSourceSyncRequest()) -> ProjectSourceSyncRead:
+    def sync_project_source(project_id: str, background_tasks: BackgroundTasks, request: ProjectSourceSyncRequest = ProjectSourceSyncRequest()) -> ProjectSourceSyncRead:
         indexed, changed_files = projects.refresh_local_directory(project_id, request.directory)
         # Source authority: stale intelligence is marked deterministically
         # right after the index refresh. Failures never fail the sync.
@@ -210,6 +211,9 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
             intelligence.deterministic_source_revalidation(project_id)
         except Exception:  # noqa: BLE001 - revalidation is best-effort
             pass
+        if changed_files:
+            intelligence.enqueue_source_revalidation_learning(project_id, changed_files)
+            queue_learning_sync(project_id, background_tasks)
         return ProjectSourceSyncRead(**indexed.model_dump(), changed_files=changed_files)
 
     @app.get("/api/projects/{project_id}/files", response_model=list[ProjectFileRead])
@@ -357,6 +361,101 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         result = knowledge_retriever.search(request)
         return KnowledgeSearchResult(matches=result.matches, warnings=result.warnings)
 
+    @app.post("/api/projects/{project_id}/rag-brain/retrieval-inspector", response_model=RetrievalResult)
+    def inspect_knowledge_retrieval(project_id: str, request: RetrievalQuery) -> RetrievalResult:
+        projects.get(project_id)
+        if request.project_id != project_id:
+            from fastapi import HTTPException
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, _t("error.knowledge_scope_mismatch"))
+        return knowledge_retriever.inspect(request)
+
+    @app.get("/api/projects/{project_id}/rag-brain/retrieval-traces", response_model=RetrievalTraceList)
+    def retrieval_traces(project_id: str, review_id: str | None = None, finding_id: str | None = None, limit: int = Query(default=50, ge=1, le=100)) -> RetrievalTraceList:
+        projects.get(project_id)
+        return RetrievalTraceList(traces=[RetrievalTraceRead.model_validate(item) for item in memory_repository.list_retrieval_traces(project_id, review_id=review_id, finding_id=finding_id, limit=limit)])
+
+    @app.get("/api/projects/{project_id}/rag-brain/retrieval-traces/{trace_id}", response_model=RetrievalTraceRead)
+    def retrieval_trace(project_id: str, trace_id: str) -> RetrievalTraceRead:
+        projects.get(project_id)
+        record = memory_repository.get_retrieval_trace(project_id, trace_id)
+        if not record:
+            from fastapi import HTTPException
+            raise HTTPException(status.HTTP_404_NOT_FOUND, _t("error.retrieval_trace_not_found"))
+        return RetrievalTraceRead.model_validate(record)
+
+    @app.get("/api/projects/{project_id}/rag-brain/relationships", response_model=RelationshipGraph)
+    def rag_brain_relationships(project_id: str, query: str = "", cap: int = Query(default=100, ge=1, le=200)) -> RelationshipGraph:
+        projects.get(project_id)
+        needle = query.casefold().strip()
+        nodes: dict[str, RelationshipNode] = {}
+        edges: dict[tuple[str, str, str], RelationshipEdge] = {}
+        truncated = False
+
+        def add_node(node: RelationshipNode) -> bool:
+            nonlocal truncated
+            if node.id in nodes:
+                return True
+            if len(nodes) >= cap:
+                truncated = True
+                return False
+            nodes[node.id] = node
+            return True
+
+        def add_edge(source: str, target: str, relation: str) -> None:
+            if source in nodes and target in nodes:
+                edges[(source, target, relation)] = RelationshipEdge(source=source, target=target, relation=relation)
+
+        records = memory_repository.list_intelligence(project_id, limit=min(cap, 100))
+        for record in records:
+            identifier = str(record["id"])
+            label = str(record.get("statement") or identifier)
+            if needle and needle not in (identifier + " " + label).casefold():
+                continue
+            if not add_node(RelationshipNode(id=identifier, kind="knowledge", label=label[:180])):
+                break
+            for link in memory_repository.list_intelligence_links(identifier):
+                kind = str(link.get("link_kind") or "").upper()
+                value = str(link.get("link_value") or "")
+                target_kind = {"SYMBOL": "symbol", "COMPONENT": "component", "FILE": "file", "FINDING": "finding", "REVIEW": "review"}.get(kind)
+                if not target_kind or not value or (needle and needle not in value.casefold() and needle not in label.casefold()):
+                    continue
+                target_id = f"{target_kind}:{value}"
+                if add_node(RelationshipNode(id=target_id, kind=target_kind, label=value)):
+                    add_edge(identifier, target_id, str(link.get("role") or kind.lower()))
+            for evidence in memory_repository.list_intelligence_evidence(identifier, limit=24):
+                file_path = str(evidence.get("file") or "")
+                symbol_name = str(evidence.get("symbol") or "")
+                if file_path and add_node(RelationshipNode(id=f"file:{file_path}", kind="file", label=file_path, path=file_path)):
+                    add_edge(identifier, f"file:{file_path}", "source_evidence")
+                if symbol_name and add_node(RelationshipNode(id=f"symbol:{symbol_name}", kind="symbol", label=symbol_name)):
+                    add_edge(identifier, f"symbol:{symbol_name}", "source_evidence")
+            for observation in memory_repository.list_intelligence_observations(identifier, limit=40):
+                for field, node_kind, relation in (("finding_id", "finding", "observed_from"), ("review_id", "review", "observed_during")):
+                    value = str(observation.get(field) or "")
+                    if value:
+                        target_id = f"{node_kind}:{value}"
+                        if add_node(RelationshipNode(id=target_id, kind=node_kind, label=value)):
+                            add_edge(identifier, target_id, relation)
+            document = memory_repository.get_knowledge_document_by_intelligence(identifier)
+            if document:
+                doc_id = f"document:{document['id']}"
+                if add_node(RelationshipNode(id=doc_id, kind="markdown", label=document["relative_path"], path=document["relative_path"])):
+                    add_edge(identifier, doc_id, "projected_as")
+                for link in memory_repository.list_knowledge_wikilinks(project_id, document["id"]):
+                    target = link.get("target_id")
+                    target_doc = memory_repository.get_knowledge_document(target) if target else None
+                    if target_doc and target_doc.get("project_id") == project_id:
+                        target_doc_id = f"document:{target_doc['id']}"
+                        if add_node(RelationshipNode(id=target_doc_id, kind="markdown", label=target_doc["relative_path"], path=target_doc["relative_path"])):
+                            add_edge(doc_id, target_doc_id, "wikilink")
+        for trace in memory_repository.list_retrieval_traces(project_id, limit=min(cap, 100)):
+            if trace.get("finding_id"):
+                finding_id = str(trace["finding_id"])
+                finding_node = f"finding:{finding_id}"
+                if add_node(RelationshipNode(id=finding_node, kind="finding", label=finding_id)):
+                    add_edge(str(trace.get("memory_id") or ""), finding_node, "retrieved_during")
+        return RelationshipGraph(nodes=list(nodes.values()), edges=list(edges.values()), truncated=truncated)
+
     @app.post("/api/projects/{project_id}/reviews", response_model=ReviewRead, status_code=status.HTTP_201_CREATED)
     def start_review(project_id: str, request: ReviewCreate, background_tasks: BackgroundTasks) -> ReviewRead:
         review = reviews.begin(project_id, request)
@@ -395,35 +494,22 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
         # Learning triggers queue only after the decision is durable; the
         # API result is already final if learning later fails.
         intelligence.enqueue_decision_learning(project_id, finding.id, finding.decision, finding.decision_reason)
-        background_tasks.add_task(intelligence.drain_pending_jobs, project_id)
-        queue_vault_projection(project_id, background_tasks)
+        queue_learning_sync(project_id, background_tasks)
         return finding
 
     @app.patch("/api/projects/{project_id}/findings/{finding_id}/resolution", response_model=FindingRead)
     def resolve_finding(project_id: str, finding_id: str, update: FindingResolutionUpdate, background_tasks: BackgroundTasks) -> FindingRead:
         finding = reviews.resolve(project_id, finding_id, update)
         intelligence.enqueue_resolution_learning(project_id, finding.id, finding.resolution)
-        background_tasks.add_task(intelligence.drain_pending_jobs, project_id)
-        queue_vault_projection(project_id, background_tasks)
+        queue_learning_sync(project_id, background_tasks)
         return finding
 
     @app.post("/api/projects/{project_id}/findings/{finding_id}/verify-fix", response_model=FindingRead)
     def verify_finding_fix(project_id: str, finding_id: str, background_tasks: BackgroundTasks, request: FindingFixVerificationRequest = FindingFixVerificationRequest()) -> FindingRead:
         finding = reviews.verify_fix(project_id, finding_id, request.directory)
         intelligence.enqueue_fix_verification_learning(project_id, finding.id, finding.resolution)
-        background_tasks.add_task(intelligence.drain_pending_jobs, project_id)
-        queue_vault_projection(project_id, background_tasks)
+        queue_learning_sync(project_id, background_tasks)
         return finding
-
-    @app.get("/api/projects/{project_id}/chat", response_model=list[ChatMessageRead])
-    def chat_messages(project_id: str) -> list[ChatMessageRead]:
-        return chat.messages(project_id)
-
-    @app.post("/api/projects/{project_id}/chat", response_model=ChatResponse)
-    def ask_chat(project_id: str, request: ChatRequest, background_tasks: BackgroundTasks) -> ChatResponse:
-        response = chat.ask(project_id, request)
-        background_tasks.add_task(intelligence.drain_pending_jobs, project_id)
-        return response
 
     @app.get("/api/projects/{project_id}/yaml", response_model=YamlRead | None)
     def latest_yaml(project_id: str) -> YamlRead | None:
@@ -506,7 +592,21 @@ def create_app(database_path: str | None = None, import_root: str | None = None,
 
     @app.get("/api/intelligence/{memory_id}", response_model=IntelligenceDetailRead)
     def get_intelligence(memory_id: str) -> IntelligenceDetailRead:
-        return intelligence.detail(memory_id)
+        detail = intelligence.detail(memory_id)
+        current_files = {item["path"]: item for item in platform_repository.raw_files(detail.project_id)}
+        evidence = []
+        for item in detail.evidence:
+            source = current_files.get(item.file or "")
+            excerpt = None
+            hash_matches = None
+            if source and item.line:
+                lines = source["content"].splitlines()
+                start = max(1, item.line - 2)
+                end = min(len(lines), item.line + 2)
+                excerpt = "\n".join(f"{number}: {lines[number - 1]}" for number in range(start, end + 1))[:2400]
+                hash_matches = bool(item.file_hash and item.file_hash == source.get("content_hash"))
+            evidence.append(item.model_copy(update={"canonical_excerpt": excerpt, "source_hash_matches": hash_matches}))
+        return detail.model_copy(update={"evidence": evidence})
 
     @app.post("/api/intelligence/{memory_id}/revalidate", response_model=IntelligenceRevalidateResponse)
     def revalidate_intelligence(memory_id: str) -> IntelligenceRevalidateResponse:

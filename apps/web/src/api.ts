@@ -37,17 +37,16 @@ export type ReviewUnitSummary = { unit_id: string; unit_kind: 'FLOW' | 'FLOW_WIN
 export type ReviewCoverage = { total_source_segments: number; total_source_chars: number; flow_covered_chars: number; fallback_covered_chars: number; source_coverage_percent: number; flow_coverage_percent: number; flow_unit_count: number; fallback_unit_count: number; truncated_scenarios: number; unresolved_flow_regions: number; average_source_chars_per_unit?: number; max_source_chars_per_unit?: number; async_composite_count?: number }
 export type ReviewOutputBudgetSnapshot = { investigator: OutputBudget; verifier: OutputBudget; verifier_fix: number }
 export type Review = { id: string; project_id: string; status: string; progress: string[]; finding_count: number; scope: string; focus: string[]; context_files: string[]; review_units?: ReviewUnitSummary[]; source_coverage?: ReviewCoverage; context_chars: number; source_snapshot_hash?: string | null; total_batches: number; validated_batches: number; unavailable_batches: number; execution_attempt?: number; execution_progress?: ReviewExecutionProgress; last_activity_at?: string | null; diagnostics?: ReviewDiagnostic[]; output_budget_snapshot: ReviewOutputBudgetSnapshot; error?: string | null }
-export type ChatMessage = { id: string; role: string; content: string; created_at: string }
 export type Memory = { id: string; type: string; statement: string; status: string; scope: { type: string; symbol?: string; component?: string }; evidence: { symbol: string }[] }
 export type IntelligenceLink = { id: number; memory_id: string; link_kind: string; link_value: string; role: string; created_at: string }
-export type IntelligenceEvidence = { id: number; memory_id: string; kind: string; file: string | null; line: number | null; symbol: string | null; file_hash: string | null; description: string | null; created_at: string }
+export type IntelligenceEvidence = { id: number; memory_id: string; kind: string; file: string | null; line: number | null; symbol: string | null; file_hash: string | null; description: string | null; created_at: string; canonical_excerpt: string | null; source_hash_matches: boolean | null }
 export type IntelligenceObservation = { id: number; memory_id: string; kind: string; from_state: string | null; to_state: string | null; confidence: number | null; confidence_delta: number | null; fingerprint: string | null; review_id: string | null; finding_id: string | null; chat_message_id: string | null; detail: string | null; created_at: string }
 export type IntelligenceConflict = { id: number; memory_id: string; evidence: Record<string, unknown>; snapshot: Record<string, unknown>; resolution_state: string; detail: string | null; created_at: string; resolved_at: string | null }
 export type IntelligenceRecord = {
   id: string; project_id: string; type: string; statement: string; state: string; status: string;
   confidence: number; origin: string; observation_count: number; reinforcement_count: number;
   superseded_by: string | null; conflict_summary: string | null; scope: { type: string; symbol?: string; component?: string };
-  links: IntelligenceLink[]; evidence_count: number; last_evidence: IntelligenceEvidence[];
+  links: IntelligenceLink[]; evidence_count: number; last_evidence: IntelligenceEvidence[]; linked_finding_ids: string[]; linked_review_ids: string[];
   first_observed_at: string | null; last_observed_at: string | null; last_validated_at: string | null;
   last_validated_commit: string | null; created_at: string; updated_at: string
 }
@@ -55,6 +54,16 @@ export type IntelligenceDetail = IntelligenceRecord & { observations: Intelligen
 export type IntelligenceCounts = { total: number; provisional: number; reinforced: number; verified: number; needs_revalidation: number; conflicted: number; superseded: number; disabled: number; by_type: Record<string, number> }
 export type IntelligenceList = { records: IntelligenceRecord[]; counts: IntelligenceCounts }
 export type IntelligenceSummary = { counts: IntelligenceCounts; health: { open_conflicts: number; stale_records: number; last_job_status: string | null; last_job_at: string | null } }
+export type RetrievalQuery = { project_id: string; query: string; symbols: string[]; files: string[]; component?: string; cap: number }
+export type RetrievalMatch = { intelligence_id: string; document_id: string; chunk_id: string | null; heading_path: string | null; statement: string; type: string; state: string; confidence: number; score: number; match_signals: string[]; lifecycle_warning: string | null; related_ids: string[]; relative_path: string | null; included: boolean; exclusion_reason: string | null }
+export type RetrievalResult = { matches: RetrievalMatch[]; used_semantic: boolean; used_fts: boolean; warnings: string[] }
+export type RetrievalTraceMatch = { chunk_id: string; document_id: string; intelligence_id: string | null; score: number; match_signals: string[]; lifecycle_state: string; included: boolean; exclusion_reason: string | null; relative_path: string | null; heading_path: string | null; excerpt: string }
+export type RetrievalTrace = { id: string; project_id: string; role: string; review_id: string | null; finding_id: string | null; memory_id: string | null; source_snapshot_hash: string; query: string; metadata_filters: Record<string, unknown>; selected_chunk_ids: string[]; results: RetrievalTraceMatch[]; prompt_version: string; created_at: string }
+export type RelationshipNode = { id: string; kind: string; label: string; path: string | null }
+export type RelationshipEdge = { source: string; target: string; relation: string }
+export type RelationshipGraph = { nodes: RelationshipNode[]; edges: RelationshipEdge[]; truncated: boolean }
+export type KnowledgeDocument = { id: string; project_id: string; intelligence_id: string; relative_path: string; content_hash: string; sync_status: string; source_status: string; schema_version: number; external_modified_at: string | null; last_indexed_at: string | null; created_at: string; updated_at: string }
+export type KnowledgeDocumentDetail = KnowledgeDocument & { frontmatter: Record<string, unknown>; body: string }
 export type LearningSummary = { review_id: string; project_id: string; job_id: string | null; status: string; provisional: number; reinforced: number; verified: number; needs_revalidation: number; conflicted: number; superseded: number; rejected: number; error: string | null; updated_at: string | null }
 export type YamlResult = { project_id: string; content: string; valid: boolean; errors: string[] }
 export type Symbol = { name: string; kind: string; file: string; line: number }
@@ -108,12 +117,18 @@ export const api = {
   decide: (id: string, findingId: string, decision: string, reason?: string) => request<Finding>(`${projectPath(id)}/findings/${findingId}/decision`, { method: 'PATCH', body: JSON.stringify({ decision, reason, propose_memory: false }) }),
   resolve: (id: string, findingId: string, resolution: 'OPEN' | 'SOLVED') => request<Finding>(`${projectPath(id)}/findings/${findingId}/resolution`, { method: 'PATCH', body: JSON.stringify({ resolution }) }),
   verifyFix: (id: string, findingId: string, directory?: string) => request<Finding>(`${projectPath(id)}/findings/${findingId}/verify-fix`, { method: 'POST', body: JSON.stringify(directory ? { directory } : {}) }),
-  messages: (id: string) => request<ChatMessage[]>(`${projectPath(id)}/chat`),
-  chat: (id: string, message: string, selected_file?: string, finding_id?: string) => request<{ message: ChatMessage; context_summary: string[] }>(`${projectPath(id)}/chat`, { method: 'POST', body: JSON.stringify({ message, selected_file, finding_id }) }),
   memories: (id: string) => request<Memory[]>(`${projectPath(id)}/memory`),
   intelligence: (id: string, state?: string, type?: string) => request<IntelligenceList>(`${projectPath(id)}/intelligence${buildQuery({ state, type })}`),
   intelligenceSummary: (id: string) => request<IntelligenceSummary>(`${projectPath(id)}/intelligence/summary`),
   intelligenceDetail: (memoryId: string) => request<IntelligenceDetail>(`/api/intelligence/${encodeURIComponent(memoryId)}`),
+  knowledgeDocuments: (id: string) => request<KnowledgeDocument[]>(`${projectPath(id)}/knowledge/documents`),
+  knowledgeDocument: (id: string, documentId: string) => request<KnowledgeDocumentDetail>(`${projectPath(id)}/knowledge/documents/${encodeURIComponent(documentId)}`),
+  knowledgeSyncState: (id: string) => request<VaultSyncState | null>(`${projectPath(id)}/knowledge/sync-state`),
+  retryKnowledgeIndex: (id: string) => request<KnowledgeRetryOutcome>(`${projectPath(id)}/knowledge/retry-index`, { method: 'POST' }),
+  inspectRetrieval: (id: string, query: RetrievalQuery) => request<RetrievalResult>(`${projectPath(id)}/rag-brain/retrieval-inspector`, { method: 'POST', body: JSON.stringify(query) }),
+  retrievalTraces: (id: string) => request<{ traces: RetrievalTrace[] }>(`${projectPath(id)}/rag-brain/retrieval-traces?limit=100`),
+  retrievalTrace: (id: string, traceId: string) => request<RetrievalTrace>(`${projectPath(id)}/rag-brain/retrieval-traces/${encodeURIComponent(traceId)}`),
+  relationships: (id: string, query = '') => request<RelationshipGraph>(`${projectPath(id)}/rag-brain/relationships?cap=100${query ? `&query=${encodeURIComponent(query)}` : ''}`),
   revalidateIntelligence: (memoryId: string) => request<{ record: IntelligenceRecord; outcome: string; detail: string }>(`/api/intelligence/${encodeURIComponent(memoryId)}/revalidate`, { method: 'POST' }),
   disableIntelligence: (memoryId: string, reason?: string) => request<IntelligenceRecord>(`/api/intelligence/${encodeURIComponent(memoryId)}/disable`, { method: 'POST', body: JSON.stringify({ reason: reason ?? null }) }),
   learningSummary: (id: string, reviewId: string) => request<LearningSummary>(`${projectPath(id)}/reviews/${encodeURIComponent(reviewId)}/learning-summary`),

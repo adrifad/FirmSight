@@ -14,10 +14,10 @@ function readStoredTheme(): Theme | null {
 }
 
 function getInitialTheme(): Theme {
-  if (typeof window === 'undefined') return 'light'
+  if (typeof window === 'undefined') return 'dark'
   const stored = readStoredTheme()
   if (stored) return stored
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  return 'dark'
 }
 
 /**
@@ -26,8 +26,8 @@ function getInitialTheme(): Theme {
  * - Applies the active theme as a `data-theme` attribute on <html>
  *   (consumed by the light/dark token sets in theme.css).
  * - Persists explicit choices to localStorage under "firmsight-theme".
- * - Until the user picks a theme, falls back to the OS
- *   `prefers-color-scheme` preference.
+ * - New workspaces open in FirmSight's dark engineering theme unless the
+ *   user has already saved an explicit preference.
  */
 export function useTheme() {
   const [theme, setThemeState] = useState<Theme>(getInitialTheme)

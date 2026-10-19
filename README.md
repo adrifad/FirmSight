@@ -1,6 +1,6 @@
 # FirmSight
 
-FirmSight is an evidence-oriented firmware review workspace. It treats firmware source as untrusted data, never runs imported code, and keeps engineer-approved memory separate from AI suggestions and chat history.
+FirmSight is an evidence-oriented firmware review workspace. It treats firmware source as untrusted data, never runs imported code, and keeps engineer-approved knowledge separate from AI suggestions.
 
 ## First milestone workflow
 
@@ -9,9 +9,8 @@ FirmSight is an evidence-oriented firmware review workspace. It treats firmware 
 3. Browse source in the read-only Monaco code viewer.
 4. Run a Full Project review to create structured, verifier-backed findings.
 5. Inspect evidence, execution path, assumptions, verification, impact, and recommendation; then accept, reject (with reason), or mark intentional.
-6. Ask project-aware questions in AI Chat.
-7. Save engineer-approved lessons in Engineering Memory.
-8. Generate, edit, and validate `firmware.ai.yaml` from the YAML Generator.
+6. Inspect and manage project knowledge in RAG Brain.
+7. Generate, edit, and validate `firmware.ai.yaml` from the YAML Generator.
 
 AI Review and YAML generation use the configured server-side provider: Investigator proposes structured candidates, then Verifier/Skeptic attempts to disprove them. They never fall back to local pattern matching or a generated template. If the API key or required model is unavailable, FirmSight shows an explicit configuration error. OpenRouter and 9router use the same isolated OpenAI-compatible transport; keys remain server-only and are never returned by the API or UI.
 
@@ -21,7 +20,7 @@ Fix Verification is an evidence-based, differential, source-authoritative,
 topology-aware check for an accepted CONFIRMED_BUG. It compares the finding
 and indexed baseline source with freshly indexed current source, a bounded
 source diff, current callers/callees and resource relations, and only relevant
-Project Intelligence. Structured current-path edges are validated against
+RAG Brain knowledge. Structured current-path edges are validated against
 refreshed indexed relations. Source snapshots and the structured verification
 report are persisted with the finding so the verdict remains inspectable. A
 missing or incomplete changed-file list does not by itself determine the verdict.
@@ -61,7 +60,7 @@ control-flow graph. Calls and statically resolved registrations are observed;
 ambiguous targets remain inferred or unresolved. Queue paths connect only when
 the same handle identity is visible. Data facts cover a small source-indexed
 API and predicate vocabulary, not general taint or alias analysis. Traversal
-and context are bounded, and truncation is reported. Review, chat, findings, and
+and context are bounded, and truncation is reported. Reviews, findings, and
 Fix Verification can use this flow evidence while current source remains the
 highest authority. Unsupported or unresolved paths should lower confidence or
 remain inconclusive rather than be invented.
@@ -160,7 +159,7 @@ mv $db_path "$databases_backup/firmsight-$stamp.db"
 Notes:
 
 - The reset removes FirmSight records and settings only: projects, source
-  indexes, reviews, findings, chat history, YAML generations, Project
+  indexes, reviews, findings, legacy chat history, YAML generations, Project
   Intelligence, and learning jobs. Your firmware directories and `.env` provider
   credentials are not part of the SQLite database and are never touched.
 - The optional Obsidian vault is a Markdown projection that lives outside the
@@ -208,7 +207,7 @@ export FIRMSIGHT_AI_PROVIDER='openai-compatible'
 
 Use Settings to set the endpoint (always the full `/chat/completions` URL) and role models. The Settings page includes a local 9router preset that fills `9router` and `http://127.0.0.1:20128/v1/chat/completions`; it does not overwrite your model selection or secret. The **Review context per AI request** dropdown controls the bounded source-context budget for each review request. **Structured output mode** defaults to `PROMPT_ONLY` for broad gateway compatibility; `JSON_OBJECT` and `JSON_SCHEMA` send the corresponding OpenAI-compatible `response_format` only when explicitly selected. **Reasoning effort** is an optional provider hint (`UNSPECIFIED`, `LOW`, `MEDIUM`, `HIGH`); reasoning and final content share the configured token limit. **Investigator** and **Verifier output budget** settings retain numeric choices and also offer `PROVIDER_DEFAULT` (**Provider default — no FirmSight output cap**), which omits FirmSight's `max_tokens` field for that structured request. Provider default is not unlimited: the gateway/model still imposes its own limit and may change latency or cost; numeric budgets provide more predictable usage. A reasoning-only or truncated completion is never converted into a finding. The complete prompt includes role instructions, review metadata, and a JSON schema. Smaller context values reduce per-request latency and timeout risk while creating more batches. FirmSight records source-batch inclusion separately from schema-validated AI coverage, so a review with unavailable batches is reported as partial rather than an all-clear result. For example, a router catalog may expose `glm/glm-4-flash`, but model IDs are controlled by the router and must be confirmed there. For GLM Flash on OpenRouter, a pinned model is `z-ai/glm-5.3-flash`; `~z-ai/glm-flash-latest` follows the provider's latest Flash target and can change over time.
 
-During a review, expand **Request diagnostics** to see the request ID, provider/model, batch, lifecycle state, elapsed time, response size, content state, finish reason, and safe failure category. Validation diagnostics report only a category and field paths (never raw completions or source). A completed `0 candidate findings` event means the Investigator returned valid structured JSON and found no qualifying candidate in that batch. A timeout means the provider did not finish the request before FirmSight's 90-second transport limit. A full review is successful only when every planned Investigator batch is schema-validated; otherwise the review remains partial/interrupted and shows its `validated / total` coverage. Chat requests are usually smaller than review batches, so a successful Chat reply does not prove every review request will finish. Token usage is shown only when the selected gateway reports an OpenAI-compatible `usage` object; otherwise FirmSight explicitly shows that usage was not reported. Compare the request ID and timestamp with 9router/FreGateway logs when investigating an upstream wait. Resume is guarded by a source snapshot fingerprint; if the indexed project changes after a partial review, FirmSight rejects the resume and asks you to start a new review so old validated batches cannot be mixed with new source. If the backend process stops while a review is running, the next poll marks the stale job interrupted instead of leaving the UI waiting indefinitely.
+During a review, expand **Request diagnostics** to see the request ID, provider/model, batch, lifecycle state, elapsed time, response size, content state, finish reason, and safe failure category. Validation diagnostics report only a category and field paths (never raw completions or source). A completed `0 candidate findings` event means the Investigator returned valid structured JSON and found no qualifying candidate in that batch. A timeout means the provider did not finish the request before FirmSight's 90-second transport limit. A full review is successful only when every planned Investigator batch is schema-validated; otherwise the review remains partial/interrupted and shows its `validated / total` coverage. Token usage is shown only when the selected gateway reports an OpenAI-compatible `usage` object; otherwise FirmSight explicitly shows that usage was not reported. Compare the request ID and timestamp with 9router/FreGateway logs when investigating an upstream wait. Resume is guarded by a source snapshot fingerprint; if the indexed project changes after a partial review, FirmSight rejects the resume and asks you to start a new review so old validated batches cannot be mixed with new source. If the backend process stops while a review is running, the next poll marks the stale job interrupted instead of leaving the UI waiting indefinitely.
 
 The Settings page also exposes **Parallel review requests** (1–3, default 2),
 which bounds shared Investigator work and helps control provider overload.
@@ -249,9 +248,9 @@ curl -sS -o /tmp/firmsight-ai-response.json -w 'HTTP %{http_code}\n' "$FIRMSIGHT
 - Source comments, strings, and documentation are data, not AI instructions.
 - Engineering Memory is used for analysis only after an explicit engineer approval action.
 
-## Project Intelligence, Obsidian, and lifetime analysis
+## RAG Brain, Obsidian, and lifetime analysis
 
-FirmSight keeps SQLite as the authoritative store for Project Intelligence. An
+FirmSight keeps SQLite as the authoritative store for RAG Brain knowledge. An
 Obsidian vault is an optional, portable Markdown projection and retrieval corpus;
 editing a Markdown file cannot promote a record to `VERIFIED` or bypass source
 revalidation. Configure the server-side vault root with either

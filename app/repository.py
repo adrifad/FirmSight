@@ -157,6 +157,21 @@ class MemoryRepository:
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS retrieval_traces (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, role TEXT NOT NULL,
+                    review_id TEXT, finding_id TEXT, memory_id TEXT,
+                    source_snapshot_hash TEXT NOT NULL, query TEXT NOT NULL,
+                    filters_json TEXT NOT NULL, selected_chunk_ids_json TEXT NOT NULL,
+                    results_json TEXT NOT NULL, prompt_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_retrieval_traces_project_created
+                    ON retrieval_traces(project_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_retrieval_traces_review
+                    ON retrieval_traces(project_id, review_id);
+                CREATE INDEX IF NOT EXISTS idx_retrieval_traces_finding
+                    ON retrieval_traces(project_id, finding_id);
                 """
             )
             # Project-scoped full-text search when FTS5 is available; the LIKE
@@ -1074,6 +1089,58 @@ class MemoryRepository:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM knowledge_index_state WHERE project_id = ?", (project_id,)).fetchone()
         return dict(row) if row else None
+
+    def add_retrieval_trace(self, record: dict[str, Any]) -> None:
+        """Persist bounded retrieval metadata, never prompts or source text."""
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO retrieval_traces(
+                    id,project_id,role,review_id,finding_id,memory_id,
+                    source_snapshot_hash,query,filters_json,selected_chunk_ids_json,
+                    results_json,prompt_version,created_at
+                ) VALUES (:id,:project_id,:role,:review_id,:finding_id,:memory_id,
+                    :source_snapshot_hash,:query,:filters_json,:selected_chunk_ids_json,
+                    :results_json,:prompt_version,:created_at)""",
+                {
+                    **record,
+                    "filters_json": json.dumps(record.get("metadata_filters") or {}, sort_keys=True),
+                    "selected_chunk_ids_json": json.dumps(record.get("selected_chunk_ids") or []),
+                    "results_json": json.dumps(record.get("results") or [], sort_keys=True),
+                },
+            )
+
+    @staticmethod
+    def _decode_retrieval_trace(row: sqlite3.Row) -> dict[str, Any]:
+        record = dict(row)
+        record["metadata_filters"] = json.loads(record.pop("filters_json") or "{}")
+        record["selected_chunk_ids"] = json.loads(record.pop("selected_chunk_ids_json") or "[]")
+        record["results"] = json.loads(record.pop("results_json") or "[]")
+        return record
+
+    def list_retrieval_traces(self, project_id: str, *, review_id: str | None = None, finding_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        clauses = ["project_id=?"]
+        values: list[Any] = [project_id]
+        if review_id:
+            clauses.append("review_id=?")
+            values.append(review_id)
+        if finding_id:
+            clauses.append("finding_id=?")
+            values.append(finding_id)
+        values.append(max(1, min(int(limit), 100)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM retrieval_traces WHERE " + " AND ".join(clauses) + " ORDER BY created_at DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [self._decode_retrieval_trace(row) for row in rows]
+
+    def get_retrieval_trace(self, project_id: str, trace_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM retrieval_traces WHERE project_id=? AND id=?",
+                (project_id, trace_id),
+            ).fetchone()
+        return self._decode_retrieval_trace(row) if row else None
 
     def set_knowledge_index_state(self, record: dict[str, Any]) -> None:
         record = {"last_error": None, "quarantine_count": 0, "document_version": None, "content_hash": None, "frontmatter_hash": None, **record}

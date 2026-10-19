@@ -124,6 +124,8 @@ class MemorySynthesisResult(BaseModel):
 class VerificationEvidence(BaseModel):
     file: str = Field(min_length=1, max_length=1000)
     line: int = Field(default=1, ge=1)
+    line_end: int | None = Field(default=None, ge=1)
+    excerpt: str = Field(default="", max_length=4000)
     description: str = Field(min_length=4, max_length=1000)
 
 
@@ -151,6 +153,8 @@ class IntelligenceEvidenceRead(BaseModel):
     file_hash: str | None = None
     description: str | None = None
     created_at: datetime
+    canonical_excerpt: str | None = None
+    source_hash_matches: bool | None = None
 
 
 class IntelligenceLinkRead(BaseModel):
@@ -206,6 +210,8 @@ class IntelligenceRecordRead(BaseModel):
     links: list[IntelligenceLinkRead] = Field(default_factory=list)
     evidence_count: int = 0
     last_evidence: list[IntelligenceEvidenceRead] = Field(default_factory=list)
+    linked_finding_ids: list[str] = Field(default_factory=list, max_length=20)
+    linked_review_ids: list[str] = Field(default_factory=list, max_length=20)
     first_observed_at: datetime | None = None
     last_observed_at: datetime | None = None
     last_validated_at: datetime | None = None

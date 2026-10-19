@@ -21,9 +21,8 @@ export const CATALOG: Dict = {
   'nav.code': ['Code', 'Kode'],
   'nav.review': ['AI Review', 'AI Review'],
   'nav.findings': ['Findings', 'Temuan'],
-  'nav.chat': ['AI Chat', 'AI Chat'],
   'nav.architecture': ['Architecture', 'Arsitektur'],
-  'nav.memory': ['Project Intelligence', 'Project Intelligence'],
+  'nav.rag-brain': ['RAG Brain', 'RAG Brain'],
   'nav.yaml': ['YAML Generator', 'YAML Generator'],
   'nav.settings': ['Settings', 'Pengaturan'],
   'nav.workspace': ['Workspace', 'Ruang kerja'],
@@ -78,7 +77,7 @@ export const CATALOG: Dict = {
   // Delete dialog
   'delete.eyebrow': ['DESTRUCTIVE ACTION', 'AKSI DESTRUKTIF'],
   'delete.title': ['Delete “{name}”?', 'Hapus “{name}”?'],
-  'delete.copy': ['This permanently deletes the FirmSight records stored for {name}: source index, reviews, findings and decisions, chat history, YAML generations, Project Intelligence knowledge, learning jobs, and review learning summaries. Your local firmware directory and its files are not deleted.', 'Ini menghapus permanen seluruh data FirmSight untuk {name}: indeks sumber, review, temuan dan keputusan, riwayat chat, hasil YAML, pengetahuan Project Intelligence, pekerjaan pembelajaran, dan ringkasan pembelajaran review. Direktori firmware lokal Anda beserta berkasnya tidak dihapus.'],
+  'delete.copy': ['This permanently deletes the FirmSight records stored for {name}: source index, reviews, findings and decisions, legacy chat history, YAML generations, RAG Brain knowledge, learning jobs, and review learning summaries. Your local firmware directory and its files are not deleted.', 'Ini menghapus permanen seluruh data FirmSight untuk {name}: indeks sumber, review, temuan dan keputusan, riwayat chat lama, hasil YAML, pengetahuan RAG Brain, pekerjaan pembelajaran, dan ringkasan pembelajaran review. Direktori firmware lokal Anda beserta berkasnya tidak dihapus.'],
   'delete.error_refresh': ['“{name}” was deleted from FirmSight, but the project list could not be refreshed. Retry refresh — the delete request will not be sent again.', '“{name}” telah dihapus dari FirmSight, tetapi daftar proyek tidak dapat dimuat ulang. Coba muat ulang — permintaan hapus tidak akan dikirim ulang.'],
   'delete.error_failed': ['FirmSight could not delete this project. It remains fully intact; try again.', 'FirmSight tidak dapat menghapus proyek ini. Proyek tetap utuh; coba lagi.'],
   'delete.refreshing': ['Refreshing…', 'Menyegarkan…'],
@@ -366,16 +365,6 @@ export const CATALOG: Dict = {
   'reject.label.reason': ['Rejection reason', 'Alasan penolakan'],
   'reject.placeholder': ['Example: Only measurement_task writes this buffer; MQTT receives a copied queue snapshot.', 'Contoh: Hanya measurement_task yang menulis buffer ini; MQTT menerima salinan snapshot queue.'],
 
-  // Chat page
-  'chat.empty.title': ['No project conversation', 'Belum ada percakapan proyek'],
-  'chat.empty.detail': ['Select a project to ask FirmSight about its indexed source.', 'Pilih proyek untuk bertanya kepada FirmSight tentang sumber terindeksnya.'],
-  'chat.context': ['Project-aware context · source and comments are untrusted data', 'Konteks sadar proyek · sumber dan komentar adalah data tidak tepercaya'],
-  'chat.you': ['You', 'Anda'],
-  'chat.empty_conversation.title': ['Ask about this firmware', 'Bertanyalah tentang firmware ini'],
-  'chat.empty_conversation.detail': ['Ask about execution paths, project architecture, or assumptions in a finding.', 'Tanyakan jalur eksekusi, arsitektur proyek, atau asumsi dalam sebuah temuan.'],
-  'chat.placeholder': ['Ask FirmSight about this project…', 'Bertanyalah kepada FirmSight tentang proyek ini…'],
-  'chat.error_send': ['FirmSight could not send that message.', 'FirmSight tidak dapat mengirim pesan tersebut.'],
-
   // Architecture page
   'arch.empty.title': ['No architecture context', 'Belum ada konteks arsitektur'],
   'arch.empty.detail': ['Select a project to inspect indexed firmware entities.', 'Pilih proyek untuk memeriksa entitas firmware terindeks.'],
@@ -443,7 +432,7 @@ export const CATALOG: Dict = {
   'intel.kb.results': ['RETRIEVAL RESULTS', 'HASIL RETRIEVAL'],
   'intel.kb.no_matches': ['No same-project knowledge matched this query.', 'Tidak ada pengetahuan proyek yang sama cocok dengan kueri ini.'],
   'intel.none.title': ['No project intelligence yet.', 'Belum ada project intelligence.'],
-  'intel.none.detail': ['FirmSight learns automatically from completed reviews, finding decisions, verified fixes, and grounded chat. Nothing is stored without evidence, and automatic knowledge never starts as fact.', 'FirmSight belajar otomatis dari review yang selesai, keputusan temuan, perbaikan terverifikasi, dan chat yang berbasis bukti. Tidak ada yang disimpan tanpa bukti, dan pengetahuan otomatis tidak pernah dimulai sebagai fakta.'],
+  'intel.none.detail': ['FirmSight learns from completed reviews, finding decisions, verified fixes, and source revalidation. Nothing is stored without evidence, and automatic knowledge never starts as fact.', 'FirmSight belajar dari review yang selesai, keputusan temuan, perbaikan terverifikasi, dan revalidasi sumber. Tidak ada yang disimpan tanpa bukti, dan pengetahuan otomatis tidak pernah dimulai sebagai fakta.'],
   'intel.toast.verified': ['Record verified against current source.', 'Catatan terverifikasi terhadap sumber terkini.'],
   'intel.toast.conflicted': ['Current source contradicts this record; it is marked conflicted.', 'Sumber terkini berkontradiksi dengan catatan ini; ditandai berkonflik.'],
   'intel.toast.revalidated': ['Revalidation recorded against the current indexed source.', 'Revalidasi dicatat terhadap sumber terindeks saat ini.'],
@@ -499,7 +488,7 @@ export const CATALOG: Dict = {
   'intel.suggest.propose': ['Propose knowledge', 'Usulkan pengetahuan'],
   'intel.suggest.save': ['Save knowledge', 'Simpan pengetahuan'],
   'intel.suggest.ignore': ['Ignore', 'Abaikan'],
-  'intel.disable.eyebrow': ['PROJECT INTELLIGENCE', 'PROJECT INTELLIGENCE'],
+  'intel.disable.eyebrow': ['RAG BRAIN', 'RAG BRAIN'],
   'intel.disable.title': ['Disable knowledge', 'Nonaktifkan pengetahuan'],
   'intel.disable.copy': ['Disabling removes this record from all future analysis. The observation history is preserved for audit.', 'Menonaktifkan menghapus catatan ini dari semua analisis berikutnya. Riwayat observasi tetap disimpan untuk audit.'],
   'intel.disable.reason': ['Optional reason', 'Alasan opsional'],
@@ -593,7 +582,7 @@ export const CATALOG: Dict = {
   'settings.finalization.AUTO': ['Automatic — recommended for DeepSeek', 'Otomatis — disarankan untuk DeepSeek'],
   'settings.finalization.ALWAYS': ['Always allow one bounded retry', 'Selalu izinkan satu percobaan ulang terbatas'],
   'settings.finalization.NEVER': ['Never retry', 'Jangan pernah mencoba ulang'],
-  'settings.hint.finalization': ['With Low/Medium/High reasoning, DeepSeek can spend the entire completion budget on hidden reasoning and finish before the required JSON. When that happens, Automatic and Always make one extra request with thinking disabled, a concise-JSON-only instruction, and a bounded 1,600-token final-output budget. The same schema and source context are reused; hidden reasoning from the failed attempt is discarded and the retried JSON must still pass normal validation. Never disables this recovery. Successful chat requests are never retried.', 'Dengan reasoning Rendah/Sedang/Tinggi, DeepSeek dapat menghabiskan seluruh anggaran completion untuk reasoning tersembunyi dan selesai sebelum JSON yang wajib. Bila itu terjadi, Otomatis dan Selalu membuat satu permintaan tambahan dengan thinking dimatikan, instruksi khusus JSON ringkas, dan anggaran output akhir terbatas 1.600 token. Skema dan konteks sumber yang sama dipakai ulang; reasoning tersembunyi dari percobaan gagal dibuang dan JSON hasil coba ulang tetap harus lulus validasi normal. Never mematikan pemulihan ini. Permintaan chat yang sukses tidak pernah diulang.'],
+  'settings.hint.finalization': ['With Low/Medium/High reasoning, DeepSeek can spend the entire completion budget on hidden reasoning and finish before the required JSON. When that happens, Automatic and Always make one extra request with thinking disabled, a concise-JSON-only instruction, and a bounded 1,600-token final-output budget. The same schema and source context are reused; hidden reasoning from the failed attempt is discarded and the retried JSON must still pass normal validation. Never disables this recovery. Successful model requests are never retried.', 'Dengan reasoning Rendah/Sedang/Tinggi, DeepSeek dapat menghabiskan seluruh anggaran completion untuk reasoning tersembunyi dan selesai sebelum JSON yang wajib. Bila itu terjadi, Otomatis dan Selalu membuat satu permintaan tambahan dengan thinking dimatikan, instruksi khusus JSON ringkas, dan anggaran output akhir terbatas 1.600 token. Skema dan konteks sumber yang sama dipakai ulang; reasoning tersembunyi dari percobaan gagal dibuang dan JSON hasil coba ulang tetap harus lulus validasi normal. Never mematikan pemulihan ini. Permintaan model yang sukses tidak pernah diulang.'],
   'settings.label.investigator_budget': ['Investigator output budget', 'Anggaran output Investigator'],
   'settings.label.verifier_budget': ['Verifier output budget', 'Anggaran output Verifier'],
   'settings.budget.provider_default': ['Provider default — no FirmSight output cap', 'Default provider — tanpa batas output FirmSight'],
@@ -639,7 +628,7 @@ export const CATALOG: Dict = {
   'ui.language': ['Language', 'Bahasa'],
   'ui.language_saved': ['Language saved. The interface uses it immediately.', 'Bahasa disimpan. Antarmuka langsung menggunakannya.'],
   'ui.language_error': ['Unable to save the language setting.', 'Tidak dapat menyimpan pengaturan bahasa.'],
-  'ui.language.hint': ['Used for review progress, findings explanations, AI chat answers, and AI-generated YAML descriptions.', 'Digunakan untuk progres review, penjelasan temuan, jawaban AI Chat, dan deskripsi YAML yang dihasilkan AI.'],
+  'ui.language.hint': ['Used for review progress, findings explanations, and AI-generated YAML descriptions.', 'Digunakan untuk progres review, penjelasan temuan, dan deskripsi YAML yang dihasilkan AI.'],
   'ui.language.english': ['English', 'English'],
   'ui.language.indonesian': ['Bahasa Indonesia', 'Bahasa Indonesia'],
 
@@ -790,10 +779,6 @@ export const CATALOG: Dict = {
   'reject.label': ['Rejection reason', 'Alasan penolakan'],
   'reject.confirm': ['Reject finding', 'Tolak temuan'],
 
-  // Chat page additions
-  'chat.start.title': ['Ask about this firmware', 'Bertanyalah tentang firmware ini'],
-  'chat.start.detail': ['Ask about execution paths, project architecture, or assumptions in a finding.', 'Tanyakan jalur eksekusi, arsitektur proyek, atau asumsi dalam sebuah temuan.'],
-
   // Common additions
   'common.hide_details': ['Hide details', 'Sembunyikan detail'],
   'common.show_details': ['Show details', 'Tampilkan detail'],
@@ -895,7 +880,7 @@ export const CATALOG: Dict = {
   'settings.finalization.auto': ['Automatic — recommended for DeepSeek', 'Otomatis — disarankan untuk DeepSeek'],
   'settings.finalization.always': ['Always allow one bounded retry', 'Selalu izinkan satu percobaan ulang terbatas'],
   'settings.finalization.never': ['Never retry', 'Jangan pernah mencoba ulang'],
-  'settings.finalization_hint': ['With Low/Medium/High reasoning, DeepSeek can spend the entire completion budget on hidden reasoning and finish before the required JSON. When that happens, Automatic and Always make one extra request with thinking disabled, a concise-JSON-only instruction, and a bounded 1,600-token final-output budget. The same schema and source context are reused; hidden reasoning from the failed attempt is discarded and the retried JSON must still pass normal validation. Never disables this recovery. Successful chat requests are never retried.', 'Dengan reasoning Rendah/Sedang/Tinggi, DeepSeek dapat menghabiskan seluruh anggaran completion untuk reasoning tersembunyi dan selesai sebelum JSON yang wajib. Bila itu terjadi, Otomatis dan Selalu membuat satu permintaan tambahan dengan thinking dimatikan, instruksi khusus JSON ringkas, dan anggaran output akhir terbatas 1.600 token. Skema dan konteks sumber yang sama dipakai ulang; reasoning tersembunyi dari percobaan gagal dibuang dan JSON hasil coba ulang tetap harus lulus validasi normal. Never mematikan pemulihan ini. Permintaan chat yang sukses tidak pernah diulang.'],
+  'settings.finalization_hint': ['With Low/Medium/High reasoning, DeepSeek can spend the entire completion budget on hidden reasoning and finish before the required JSON. When that happens, Automatic and Always make one extra request with thinking disabled, a concise-JSON-only instruction, and a bounded 1,600-token final-output budget. The same schema and source context are reused; hidden reasoning from the failed attempt is discarded and the retried JSON must still pass normal validation. Never disables this recovery. Successful model requests are never retried.', 'Dengan reasoning Rendah/Sedang/Tinggi, DeepSeek dapat menghabiskan seluruh anggaran completion untuk reasoning tersembunyi dan selesai sebelum JSON yang wajib. Bila itu terjadi, Otomatis dan Selalu membuat satu permintaan tambahan dengan thinking dimatikan, instruksi khusus JSON ringkas, dan anggaran output akhir terbatas 1.600 token. Skema dan konteks sumber yang sama dipakai ulang; reasoning tersembunyi dari percobaan gagal dibuang dan JSON hasil coba ulang tetap harus lulus validasi normal. Never mematikan pemulihan ini. Permintaan model yang sukses tidak pernah diulang.'],
   'settings.investigator_budget': ['Investigator output budget', 'Anggaran output Investigator'],
   'settings.investigator_hint': ['This omits FirmSight’s {code} cap so the gateway can choose its native limit. It can improve completion headroom, but may increase latency/cost and remains subject to provider/model limits. Increase a numeric budget when diagnostics report {error}.', 'Ini menghilangkan batas {code} FirmSight agar gateway dapat memilih batas natifnya. Ini dapat meningkatkan ruang completion, tetapi dapat menambah latensi/biaya dan tetap tunduk pada batas provider/model. Naikkan anggaran numerik saat diagnostik melaporkan {error}.'],
   'settings.verifier_budget': ['Verifier output budget', 'Anggaran output Verifier'],

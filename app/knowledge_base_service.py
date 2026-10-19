@@ -776,7 +776,11 @@ class KnowledgeBaseService:
             if persist_state:
                 self._record_sync_state(project_id, report, "SKIPPED")
             return report
-        records = [item for item in self.repository.list_intelligence(project_id) if item.get("state") not in {"DISABLED", "SUPERSEDED"}]
+        # Keep terminal lifecycle records in the Markdown audit projection too.
+        # Retrieval applies current lifecycle state independently, so retaining
+        # their documents cannot make them eligible context and prevents old
+        # generated documents from being misclassified as unknown vault input.
+        records = self.repository.list_intelligence(project_id)
         records_by_id = {record["id"]: record for record in records}
         report = VaultSyncReport()
         blocked: set[str] = set()

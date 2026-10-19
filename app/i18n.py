@@ -281,7 +281,6 @@ _MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "error.import_before_review": ("Import a local project directory before starting a review", "Impor direktori proyek lokal sebelum memulai review"),
     "error.import_before_yaml": ("Import a local project directory before generating firmware.ai.yaml", "Impor direktori proyek lokal sebelum membuat firmware.ai.yaml"),
-    "error.chat_requires_model": ("AI Chat requires a configured chat model and server API key", "AI Chat memerlukan model chat yang terkonfigurasi dan API key server"),
     "error.yaml_requires_model": ("YAML generation requires a configured YAML Generator model and server API key", "Pembuatan YAML memerlukan model YAML Generator yang terkonfigurasi dan API key server"),
     "error.fix_verify_requires_model": ("Verify Fix requires a configured verifier model with a server API key", "Verify Fix memerlukan model verifier yang terkonfigurasi dengan API key server"),
     "error.attach_before_resume": ("Attach the current local source directory before resuming this review.", "Lampirkan direktori sumber lokal saat ini sebelum melanjutkan review ini."),
